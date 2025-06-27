@@ -294,6 +294,46 @@ The application implements comprehensive resource cleanup to prevent memory leak
 - JWT middleware for protected routes
 - CORS configuration for frontend integration
 
+## Version Control and Release Management
+
+### Development Phase Versioning
+After completing each development phase, follow this versioning workflow:
+
+1. **Commit Phase Changes**:
+   ```bash
+   git add .
+   git commit -m "feat: Complete Phase X - [Brief description]
+   
+   ## Phase X: [Phase Name]
+   ### [Category] Enhancements
+   - [List major changes and improvements]
+   
+   🤖 Generated with [Claude Code](https://claude.ai/code)
+   Co-Authored-By: Claude <noreply@anthropic.com>"
+   ```
+
+2. **Create Version Tag**:
+   ```bash
+   git tag -a v0.0.X -m "Release v0.0.X: [Phase summary]"
+   ```
+
+3. **Push to Remote**:
+   ```bash
+   git push origin master && git push origin v0.0.X
+   ```
+
+### Version History
+- **v0.0.1**: Phase 1 & 2 Complete - Security foundations and advanced network scanning
+  - Security enhancements (input validation, TLS handling, command sanitization)
+  - Performance optimizations (database pooling, resource cleanup)
+  - Multiple subnets support with per-network port scanning configuration
+  - Comprehensive testing infrastructure
+
+### Release Naming Convention
+- **Major versions** (1.0.0+): Complete feature sets with breaking changes
+- **Minor versions** (0.X.0): New feature phases without breaking changes  
+- **Patch versions** (0.0.X): Bug fixes and small improvements within a phase
+
 ## Troubleshooting
 
 ### Network Scanning Issues
