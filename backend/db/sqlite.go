@@ -26,9 +26,10 @@ func ConnectToSQLite(dbPath string) (*sql.DB, error) {
 	}
 
 	// Set connection pool size - important for handling concurrent requests
-	db.SetMaxOpenConns(15)                  // Allow up to 10 concurrent connections
-	db.SetMaxIdleConns(10)                  // Keep up to 5 idle connections
+	db.SetMaxOpenConns(25)                  // Allow up to 25 concurrent connections (increased for better throughput)
+	db.SetMaxIdleConns(15)                  // Keep up to 15 idle connections (increased for better performance)
 	db.SetConnMaxLifetime(30 * time.Minute) // Recycle connections after 30 minutes
+	db.SetConnMaxIdleTime(5 * time.Minute)  // Close idle connections after 5 minutes
 
 	// Set PRAGMA statements for better concurrent access
 	pragmas := []string{
@@ -61,10 +62,34 @@ func InitializeSchema(db *sql.DB) error {
 	_, err := db.Exec(`
 	CREATE TABLE IF NOT EXISTS networks (
 		id TEXT PRIMARY KEY,
-		cidr TEXT NOT NULL
+		cidr TEXT NOT NULL UNIQUE,
+		name TEXT,
+		description TEXT,
+		enabled BOOLEAN DEFAULT 1,
+		scan_all_ports BOOLEAN DEFAULT 0,
+		created_at TIMESTAMP NOT NULL,
+		updated_at TIMESTAMP NOT NULL
 	)`)
 	if err != nil {
 		return fmt.Errorf("failed to create networks table: %w", err)
+	}
+
+	// Add new columns to existing networks table if they don't exist
+	alterCommands := []string{
+		"ALTER TABLE networks ADD COLUMN name TEXT",
+		"ALTER TABLE networks ADD COLUMN description TEXT", 
+		"ALTER TABLE networks ADD COLUMN enabled BOOLEAN DEFAULT 1",
+		"ALTER TABLE networks ADD COLUMN scan_all_ports BOOLEAN DEFAULT 0",
+		"ALTER TABLE networks ADD COLUMN created_at TIMESTAMP",
+		"ALTER TABLE networks ADD COLUMN updated_at TIMESTAMP",
+	}
+	
+	for _, cmd := range alterCommands {
+		_, err = db.Exec(cmd)
+		if err != nil {
+			// Column might already exist, log but continue
+			log.Printf("Note: %s - column might already exist: %v", cmd, err)
+		}
 	}
 
 	// Create devices table

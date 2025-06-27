@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/xml"
 	"log"
+	"net"
 	"os/exec"
+	"reconya-ai/internal/config"
 	"reconya-ai/internal/device"
 	"reconya-ai/internal/eventlog"
+	"reconya-ai/internal/network"
 	"reconya-ai/internal/util"
 	"reconya-ai/internal/webservice"
 	"reconya-ai/models"
@@ -18,13 +21,17 @@ type PortScanService struct {
 	DeviceService   *device.DeviceService
 	EventLogService *eventlog.EventLogService
 	WebService      *webservice.WebService
+	NetworkService  *network.NetworkService
+	Config          *config.Config
 }
 
-func NewPortScanService(deviceService *device.DeviceService, eventLogService *eventlog.EventLogService) *PortScanService {
+func NewPortScanService(deviceService *device.DeviceService, eventLogService *eventlog.EventLogService, networkService *network.NetworkService, cfg *config.Config) *PortScanService {
 	return &PortScanService{
 		DeviceService:   deviceService,
 		EventLogService: eventLogService,
 		WebService:      webservice.NewWebService(),
+		NetworkService:  networkService,
+		Config:          cfg,
 	}
 }
 
@@ -110,19 +117,50 @@ func (s *PortScanService) Run(requestedDevice models.Device) {
 }
 
 func (s *PortScanService) ExecutePortScan(ipv4 string) ([]models.Port, string, string, error) {
-	// Use optimized scan options with timeout
-	// -sT: TCP connect scan (reliable), -T4: aggressive timing, --top-ports: scan most common ports
-	log.Printf("Running optimized port scan for IP %s (top 100 ports, 2min timeout)", ipv4)
+	// Determine scan mode based on which network this IP belongs to
+	scanAllPorts, err := s.determineScanMode(ipv4)
+	if err != nil {
+		log.Printf("Error determining scan mode for %s, using default: %v", ipv4, err)
+		scanAllPorts = s.Config.ScanAllPorts // Fall back to global config
+	}
 	
-	// Create context with 2 minute timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	// Build nmap command based on network-specific configuration
+	var args []string
+	var timeoutDuration time.Duration
+	var scanDescription string
+	
+	if scanAllPorts {
+		// Scan all 65535 ports with extended timeout
+		args = []string{"nmap", "-sT", "-T4", "-p-", "-oX", "-", ipv4}
+		timeoutDuration = 20 * time.Minute // Extended timeout for all ports
+		scanDescription = "all 65535 ports, 20min timeout"
+	} else {
+		// Scan top 100 ports (default behavior)
+		args = []string{"nmap", "-sT", "-T4", "--top-ports", "100", "-oX", "-", ipv4}
+		timeoutDuration = 2 * time.Minute // Standard timeout for top ports
+		scanDescription = "top 100 ports, 2min timeout"
+	}
+	
+	log.Printf("Running optimized port scan for IP %s (%s)", ipv4, scanDescription)
+	
+	// Create context with appropriate timeout
+	ctx, cancel := context.WithTimeout(context.Background(), timeoutDuration)
 	defer cancel()
 	
-	cmd := exec.CommandContext(ctx, "nmap", "-sT", "-T4", "--top-ports", "100", "-oX", "-", ipv4)
+	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+	
+	// Ensure process cleanup on context cancellation
+	go func() {
+		<-ctx.Done()
+		if cmd.Process != nil {
+			cmd.Process.Kill()
+		}
+	}()
+	
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
-			log.Printf("Port scan timeout for %s after 2 minutes", ipv4)
+			log.Printf("Port scan timeout for %s after %v", ipv4, timeoutDuration)
 			return nil, "", "", ctx.Err()
 		}
 		log.Printf("nmap error: %v, output: %s", err, string(output))
@@ -167,6 +205,40 @@ func (s *PortScanService) ParseNmapOutput(output string) ([]models.Port, string,
 		}
 	}
 	return ports, vendor, hostname
+}
+
+// determineScanMode determines whether to scan all ports for a given IP
+func (s *PortScanService) determineScanMode(ipv4 string) (bool, error) {
+	// Get all enabled networks to find which one contains this IP
+	networks, err := s.NetworkService.GetEnabledNetworks(context.Background())
+	if err != nil {
+		return false, err
+	}
+	
+	// Parse the target IP
+	targetIP := net.ParseIP(ipv4)
+	if targetIP == nil {
+		return false, nil // Invalid IP, use default
+	}
+	
+	// Check each network to see if the IP belongs to it
+	for _, network := range networks {
+		_, netCIDR, err := net.ParseCIDR(network.CIDR)
+		if err != nil {
+			log.Printf("Invalid CIDR in network %s: %s", network.Name, network.CIDR)
+			continue
+		}
+		
+		if netCIDR.Contains(targetIP) {
+			log.Printf("IP %s belongs to network %s (%s), scan_all_ports: %t", 
+				ipv4, network.Name, network.CIDR, network.ScanAllPorts)
+			return network.ScanAllPorts, nil
+		}
+	}
+	
+	// If no network found in database, fall back to global config
+	log.Printf("IP %s not found in any configured network, using global config", ipv4)
+	return s.Config.ScanAllPorts, nil
 }
 
 // scanWebServices scans for web services on the device and updates the device with web info (no screenshots)

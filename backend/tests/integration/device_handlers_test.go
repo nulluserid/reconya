@@ -25,7 +25,8 @@ func TestDeviceHandlers_Integration(t *testing.T) {
 	networkRepo := factory.NewNetworkRepository()
 	
 	cfg := testutils.GetTestConfig()
-	dbManager := db.NewDBManager()
+	testDB, _ := testutils.SetupTestDatabase(t)
+	dbManager := db.NewDBManager(testDB)
 	
 	// Create services
 	networkService := network.NewNetworkService(networkRepo, cfg, dbManager)

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 
 	"github.com/joho/godotenv"
+	"reconya-ai/internal/validation"
 )
 
 type DatabaseType string
@@ -15,15 +16,15 @@ const (
 )
 
 type Config struct {
-	JwtKey       []byte
-	NetworkCIDR  string
-	DatabaseType DatabaseType
+	NetworkCIDR   string   // Raw network range string from environment
+	NetworkRanges []string // Parsed list of individual network CIDRs
+	DatabaseType  DatabaseType
 	// SQLite config
 	SQLitePath   string
 	// Common configs
-	Username     string
-	Password     string
 	DatabaseName string
+	// Port scanning config
+	ScanAllPorts bool // Whether to scan all 65535 ports instead of just top 100
 }
 
 func LoadConfig() (*Config, error) {
@@ -36,32 +37,38 @@ func LoadConfig() (*Config, error) {
 		return nil, fmt.Errorf("NETWORK_RANGE environment variable is not set")
 	}
 
+	// Validate network CIDR format and security
+	validator := validation.NewNetworkValidator()
+	if err := validator.ValidateNetworkRange(networkCIDR); err != nil {
+		return nil, fmt.Errorf("invalid NETWORK_RANGE: %w", err)
+	}
+
+	// Parse and sanitize individual network ranges
+	networkRanges, err := validator.SanitizeNetworkRanges(networkCIDR)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse NETWORK_RANGE: %w", err)
+	}
+
 	databaseName := os.Getenv("DATABASE_NAME")
 	if databaseName == "" {
 		return nil, fmt.Errorf("DATABASE_NAME environment variable is not set")
 	}
 
-	username := os.Getenv("LOGIN_USERNAME")
-	password := os.Getenv("LOGIN_PASSWORD")
-	if username == "" || password == "" {
-		return nil, fmt.Errorf("LOGIN_USERNAME or LOGIN_PASSWORD environment variables are not set")
-	}
-
-	jwtSecret := os.Getenv("JWT_SECRET_KEY")
-	if jwtSecret == "" {
-		return nil, fmt.Errorf("JWT_SECRET_KEY environment variable is not set")
-	}
-
 	// Set database type to SQLite
 	dbType := string(SQLite)
 
+	// Parse SCAN_ALL_PORTS environment variable (defaults to false for top 100 ports)
+	scanAllPorts := false
+	if scanAllPortsEnv := os.Getenv("SCAN_ALL_PORTS"); scanAllPortsEnv == "true" || scanAllPortsEnv == "1" {
+		scanAllPorts = true
+	}
+
 	config := &Config{
-		JwtKey:       []byte(jwtSecret),
-		NetworkCIDR:  networkCIDR,
-		DatabaseType: DatabaseType(dbType),
-		Username:     username,
-		Password:     password,
-		DatabaseName: databaseName,
+		NetworkCIDR:   networkCIDR,
+		NetworkRanges: networkRanges,
+		DatabaseType:  DatabaseType(dbType),
+		DatabaseName:  databaseName,
+		ScanAllPorts:  scanAllPorts,
 	}
 
 	// Configure SQLite database

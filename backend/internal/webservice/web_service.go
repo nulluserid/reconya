@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reconya-ai/models"
+	tlsvalidator "reconya-ai/internal/tls"
 	"regexp"
 	"strconv"
 	"strings"
@@ -22,7 +23,8 @@ import (
 )
 
 type WebService struct {
-	client *http.Client
+	client            *http.Client
+	certValidator     *tlsvalidator.CertificateValidator
 }
 
 type WebInfo struct {
@@ -33,21 +35,29 @@ type WebInfo struct {
 	ContentType string
 	Size        int64
 	Screenshot  string // Base64 encoded screenshot or file path
+	// Certificate information for HTTPS services
+	CertificateInfo *tlsvalidator.CertificateValidationResult
 }
 
 func NewWebService() *WebService {
-	// Create HTTP client with timeouts and insecure TLS (for self-signed certs)
+	// Create HTTP client with timeouts and proper TLS handling
+	// We use InsecureSkipVerify here because we handle validation separately
+	// This allows us to collect certificate information even for invalid certs
 	client := &http.Client{
 		Timeout: 10 * time.Second,
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: true,
+				InsecureSkipVerify: true, // We handle validation manually
 			},
 		},
 	}
 
+	// Create certificate validator with 10 second timeout
+	certValidator := tlsvalidator.NewCertificateValidator(10 * time.Second)
+
 	return &WebService{
-		client: client,
+		client:        client,
+		certValidator: certValidator,
 	}
 }
 
@@ -126,9 +136,34 @@ func (w *WebService) fetchWebInfo(ip string, port int, protocol string, captureS
 	
 	log.Printf("Fetching web info from: %s", urlStr)
 	
+	// For HTTPS services, validate and extract certificate information
+	var certInfo *tlsvalidator.CertificateValidationResult
+	if protocol == "https" {
+		log.Printf("Validating TLS certificate for %s:%d", ip, port)
+		certInfo = w.certValidator.ValidateAndExtractCertificate(ip, port)
+		if certInfo != nil {
+			if certInfo.IsValid {
+				log.Printf("TLS certificate is valid for %s:%d", ip, port)
+			} else {
+				log.Printf("TLS certificate validation failed for %s:%d - Errors: %v", ip, port, certInfo.ValidationErrors)
+				log.Printf("Continuing with web service detection despite certificate issues")
+			}
+		} else {
+			log.Printf("Could not retrieve certificate information for %s:%d", ip, port)
+		}
+	}
+	
 	resp, err := w.client.Get(urlStr)
 	if err != nil {
 		log.Printf("Failed to fetch %s: %v", urlStr, err)
+		// Return certificate info even if HTTP request fails
+		if certInfo != nil {
+			return &WebInfo{
+				URL:             urlStr,
+				StatusCode:      0,
+				CertificateInfo: certInfo,
+			}
+		}
 		return nil
 	}
 	defer resp.Body.Close()
@@ -141,11 +176,12 @@ func (w *WebService) fetchWebInfo(ip string, port int, protocol string, captureS
 	}
 
 	webInfo := &WebInfo{
-		URL:         urlStr,
-		StatusCode:  resp.StatusCode,
-		ContentType: resp.Header.Get("Content-Type"),
-		Server:      resp.Header.Get("Server"),
-		Size:        int64(len(body)),
+		URL:             urlStr,
+		StatusCode:      resp.StatusCode,
+		ContentType:     resp.Header.Get("Content-Type"),
+		Server:          resp.Header.Get("Server"),
+		Size:            int64(len(body)),
+		CertificateInfo: certInfo, // Include certificate info for HTTPS
 	}
 
 	// Extract title from HTML
@@ -153,7 +189,7 @@ func (w *WebService) fetchWebInfo(ip string, port int, protocol string, captureS
 		webInfo.Title = w.extractTitle(string(body))
 	}
 
-	// Only consider successful responses
+	// Only consider successful responses for screenshots and return
 	if resp.StatusCode >= 200 && resp.StatusCode < 400 {
 		// Capture screenshot for successful web pages only if requested
 		if captureScreenshots && strings.Contains(strings.ToLower(webInfo.ContentType), "html") {
@@ -166,6 +202,11 @@ func (w *WebService) fetchWebInfo(ip string, port int, protocol string, captureS
 				log.Printf("Failed to capture screenshot for %s", urlStr)
 			}
 		}
+		return webInfo
+	}
+
+	// For failed HTTP responses, still return info if we have certificate data
+	if certInfo != nil {
 		return webInfo
 	}
 

@@ -1,0 +1,205 @@
+name: Phase Validation Tests
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master, develop ]
+  workflow_dispatch:
+    inputs:
+      phase:
+        description: 'Phase to test (1, 2, 3, or all)'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+        - '1'
+        - '2' 
+        - '3'
+        - 'all'
+
+env:
+  GO_VERSION: '1.23'
+  NODE_VERSION: '18'
+
+jobs:
+  validate-phase:
+    runs-on: ubuntu-latest
+    
+    strategy:
+      matrix:
+        phase: ['1', '2', '3']
+        
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ env.GO_VERSION }}
+        
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
+        cache-dependency-path: frontend/package-lock.json
+        
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y nmap sqlite3
+        
+    - name: Cache Go modules
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cache/go-build
+          ~/go/pkg/mod
+        key: ${{ runner.os }}-go-${{ hashFiles('backend/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-
+          
+    - name: Install Go dependencies
+      working-directory: backend
+      run: go mod download
+      
+    - name: Install frontend dependencies
+      working-directory: frontend
+      run: npm ci
+      
+    - name: Run Phase ${{ matrix.phase }} validation
+      run: |
+        chmod +x ./scripts/test_phase.sh
+        ./scripts/test_phase.sh ${{ matrix.phase }}
+        
+    - name: Upload test results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: test-results-phase-${{ matrix.phase }}
+        path: |
+          backend/coverage.html
+          backend/coverage.out
+          frontend/coverage/
+          
+  docker-validation:
+    runs-on: ubuntu-latest
+    needs: validate-phase
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+      
+    - name: Build Docker images
+      run: |
+        docker compose build --no-cache
+        
+    - name: Test Docker stack startup
+      run: |
+        # Start the stack
+        docker compose up -d
+        
+        # Wait for services to be ready
+        sleep 30
+        
+        # Check backend health
+        timeout 60 bash -c 'until curl -f http://localhost:3008/system-status/latest; do sleep 2; done'
+        
+        # Check frontend availability  
+        timeout 60 bash -c 'until curl -f http://localhost:3001; do sleep 2; done' || echo "Frontend check failed (may be expected)"
+        
+        # Show logs for debugging
+        docker compose logs --tail=50
+        
+        # Clean up
+        docker compose down
+        
+  security-scan:
+    runs-on: ubuntu-latest
+    needs: validate-phase
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ env.GO_VERSION }}
+        
+    - name: Run security scan
+      working-directory: backend
+      run: |
+        # Install gosec
+        go install github.com/securecodewarrior/gosec/v2/cmd/gosec@latest
+        
+        # Run security scan
+        gosec -fmt json -out security-report.json ./...
+        
+        # Also run in text format for easy reading
+        gosec ./...
+        
+    - name: Upload security report
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: security-report
+        path: backend/security-report.json
+        
+  performance-test:
+    runs-on: ubuntu-latest
+    needs: validate-phase
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ env.GO_VERSION }}
+        
+    - name: Run performance benchmarks
+      working-directory: backend
+      run: |
+        # Run Go benchmarks
+        go test -bench=. -benchmem -run=^$ ./... > benchmark-results.txt
+        
+        # Run database performance tests
+        go test -v -run=TestDatabase ./db/...
+        
+    - name: Upload performance results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: performance-results
+        path: backend/benchmark-results.txt
+        
+  summary:
+    runs-on: ubuntu-latest
+    needs: [validate-phase, docker-validation, security-scan, performance-test]
+    if: always()
+    
+    steps:
+    - name: Generate test summary
+      run: |
+        echo "# Phase Validation Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "## Test Results" >> $GITHUB_STEP_SUMMARY
+        echo "- Phase Validation: ${{ needs.validate-phase.result }}" >> $GITHUB_STEP_SUMMARY
+        echo "- Docker Validation: ${{ needs.docker-validation.result }}" >> $GITHUB_STEP_SUMMARY  
+        echo "- Security Scan: ${{ needs.security-scan.result }}" >> $GITHUB_STEP_SUMMARY
+        echo "- Performance Test: ${{ needs.performance-test.result }}" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        if [[ "${{ needs.validate-phase.result }}" == "success" && 
+              "${{ needs.docker-validation.result }}" == "success" ]]; then
+          echo "✅ **All critical validations passed!**" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "❌ **Some validations failed. Please review the results.**" >> $GITHUB_STEP_SUMMARY
+        fi

@@ -15,6 +15,7 @@ import (
 	"reconya-ai/internal/config"
 	"reconya-ai/internal/device"
 	"reconya-ai/internal/eventlog"
+	"reconya-ai/internal/lifecycle"
 	"reconya-ai/internal/network"
 	"reconya-ai/internal/nicidentifier"
 	"reconya-ai/internal/oui"
@@ -24,22 +25,6 @@ import (
 	"reconya-ai/middleware"
 )
 
-func runDeviceUpdater(service *device.DeviceService) {
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			err := service.UpdateDeviceStatuses()
-			if err != nil {
-				log.Printf("Failed to update device statuses: %v", err)
-				// Add a delay after an error to allow other operations to complete
-				time.Sleep(1 * time.Second)
-			}
-		}
-	}
-}
 
 func main() {
 	cfg, err := config.LoadConfig()
@@ -76,8 +61,8 @@ func main() {
 	eventLogRepo := repoFactory.NewEventLogRepository()
 	systemStatusRepo := repoFactory.NewSystemStatusRepository()
 
-	// Create database manager for concurrent access control
-	dbManager := db.NewDBManager()
+	// Create database manager for concurrent access control with connection pooling
+	dbManager := db.NewDBManager(sqliteDB)
 
 	// Initialize OUI service for MAC address vendor lookup
 	ouiDataPath := filepath.Join(filepath.Dir(cfg.SQLitePath), "oui")
@@ -98,16 +83,30 @@ func main() {
 	deviceService := device.NewDeviceService(deviceRepo, networkService, cfg, dbManager, ouiService)
 	eventLogService := eventlog.NewEventLogService(eventLogRepo, deviceService, dbManager)
 	systemStatusService := systemstatus.NewSystemStatusService(systemStatusRepo)
-	portScanService := portscan.NewPortScanService(deviceService, eventLogService)
+	portScanService := portscan.NewPortScanService(deviceService, eventLogService, networkService, cfg)
 	pingSweepService := pingsweep.NewPingSweepService(cfg, deviceService, eventLogService, networkService, portScanService)
 	nicService := nicidentifier.NewNicIdentifierService(networkService, systemStatusService, eventLogService, deviceService)
 	
-	authHandlers := auth.NewAuthHandlers(cfg)
+	authHandlers := auth.NewAuthHandlers()
 	middlewareHandlers := middleware.NewMiddleware(cfg)
 
+	// Create lifecycle manager for proper resource cleanup
+	lifecycleManager := lifecycle.NewManager()
+	
+	// Register background services
+	pingSweepWrapper := lifecycle.NewPingSweepServiceWrapper(pingSweepService, 30*time.Second)
+	deviceUpdaterService := lifecycle.NewDeviceUpdaterService(deviceService, 5*time.Second)
+	
+	lifecycleManager.Register(pingSweepWrapper)
+	lifecycleManager.Register(deviceUpdaterService)
+	
+	// Start all background services
+	if err := lifecycleManager.StartAll(); err != nil {
+		log.Printf("Warning: Failed to start some background services: %v", err)
+	}
+	
+	// Initial NIC identification
 	nicService.Identify()
-	go runPingSweepService(pingSweepService)
-	go runDeviceUpdater(deviceService)
 
 	mux := setupRouter(deviceService, eventLogService, systemStatusService, networkService, authHandlers, middlewareHandlers, cfg)
 	loggedRouter := middleware.LoggingMiddleware(mux)
@@ -124,7 +123,7 @@ func main() {
 		}
 	}()
 
-	waitForShutdown(server)
+	waitForShutdown(server, lifecycleManager, sqliteDB)
 }
 
 func setupRouter(
@@ -169,38 +168,72 @@ func setupRouter(
 	mux.HandleFunc("/system-status/latest", systemStatusHandlers.GetLatestSystemStatus)
 	mux.HandleFunc("/event-log", eventLogHandlers.FindLatest)
 	mux.HandleFunc("/event-log/", eventLogHandlers.FindAllByDeviceId)
+	
+	// Legacy single network endpoint
 	mux.HandleFunc("/network", networkHandlers.GetNetwork)
+	
+	// New network management endpoints
+	mux.HandleFunc("/networks", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			networkHandlers.GetAllNetworks(w, r)
+		case http.MethodPost:
+			networkHandlers.CreateNetwork(w, r)
+		default:
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+	mux.HandleFunc("/networks/", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPut:
+			networkHandlers.UpdateNetwork(w, r)
+		case http.MethodDelete:
+			networkHandlers.DeleteNetwork(w, r)
+		default:
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+	mux.HandleFunc("/networks/scan-targets", networkHandlers.GetScanTargets)
+	mux.HandleFunc("/networks/scan-config", networkHandlers.GetNetworkScanConfig)
 
 	return corsRouter
 }
 
-func runPingSweepService(service *pingsweep.PingSweepService) {
-	log.Println("Starting initial ping sweep service run...")
-	service.Run()
-
-	// Use 30 seconds for development to see updates more quickly
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
-
-	log.Printf("Ping sweep service scheduled to run every 30 seconds")
-	for range ticker.C {
-		log.Println("Running scheduled ping sweep...")
-		service.Run()
-	}
-}
-
-func waitForShutdown(server *http.Server) {
+func waitForShutdown(server *http.Server, lifecycleManager *lifecycle.Manager, db *sql.DB) {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt)
 
 	<-stop
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	log.Println("Received shutdown signal, initiating graceful shutdown...")
 
-	log.Println("Shutting down the server...")
-	if err := server.Shutdown(ctx); err != nil {
-		log.Fatalf("Server Shutdown Failed:%+v", err)
+	// Create contexts for shutdown phases
+	serverCtx, serverCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer serverCancel()
+
+	// Phase 1: Shutdown HTTP server
+	log.Println("Shutting down HTTP server...")
+	if err := server.Shutdown(serverCtx); err != nil {
+		log.Printf("HTTP server shutdown failed: %v", err)
+	} else {
+		log.Println("HTTP server stopped gracefully")
 	}
-	log.Println("Server gracefully stopped")
+
+	// Phase 2: Shutdown background services
+	log.Println("Shutting down background services...")
+	if err := lifecycleManager.Shutdown(15 * time.Second); err != nil {
+		log.Printf("Background services shutdown failed: %v", err)
+	} else {
+		log.Println("Background services stopped gracefully")
+	}
+
+	// Phase 3: Close database connections
+	log.Println("Closing database connections...")
+	if err := db.Close(); err != nil {
+		log.Printf("Database close failed: %v", err)
+	} else {
+		log.Println("Database connections closed")
+	}
+
+	log.Println("Graceful shutdown completed")
 }

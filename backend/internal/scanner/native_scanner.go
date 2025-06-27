@@ -458,7 +458,12 @@ func (s *NativeScanner) lookupVendorOnline(oui string) string {
 	// For production use, you might want to cache these lookups
 	// This is a simple implementation
 	
-	client := &http.Client{Timeout: time.Second * 2}
+	client := &http.Client{
+		Timeout: time.Second * 2,
+		Transport: &http.Transport{
+			DisableKeepAlives: true, // Prevent connection reuse
+		},
+	}
 	url := fmt.Sprintf("https://api.macvendors.com/%s", oui)
 	
 	resp, err := client.Get(url)

@@ -1,6 +1,7 @@
 package pingsweep
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os/exec"
@@ -11,6 +12,7 @@ import (
 	"reconya-ai/internal/portscan"
 	"reconya-ai/internal/scanner"
 	"reconya-ai/internal/util"
+	"reconya-ai/internal/validation"
 	"reconya-ai/models"
 	"strings"
 	"sync"
@@ -22,6 +24,7 @@ type PingSweepService struct {
 	EventLogService *eventlog.EventLogService
 	NetworkService  *network.NetworkService
 	PortScanService *portscan.PortScanService
+	Validator       *validation.NetworkValidator
 	portScanQueue   chan models.Device
 	portScanWorkers sync.WaitGroup
 }
@@ -39,6 +42,7 @@ func NewPingSweepService(
 		EventLogService: eventLogService,
 		NetworkService:  networkService,
 		PortScanService: portScanService,
+		Validator:       validation.NewNetworkValidator(),
 		portScanQueue:   make(chan models.Device, 100), // Buffer for 100 devices
 	}
 	
@@ -60,17 +64,48 @@ func (s *PingSweepService) Run() {
 	if err != nil {
 		log.Printf("Error creating ping sweep event log: %v", err)
 	}
-	devices, err := s.ExecuteSweepScanCommand(s.Config.NetworkCIDR)
+	
+	// Get scan targets from network service (includes database and config)
+	networkRanges, err := s.NetworkService.GetScanTargets(context.Background())
 	if err != nil {
-		log.Printf("Error executing sweep scan: %v\n", err)
+		log.Printf("Error getting scan targets: %v", err)
 		return
 	}
 	
-	log.Printf("Ping sweep found %d devices from scan", len(devices))
+	if len(networkRanges) == 0 {
+		log.Printf("No network ranges configured for scanning")
+		return
+	}
+	
+	log.Printf("Scanning %d network ranges: %v", len(networkRanges), networkRanges)
+	
+	var allDevices []models.Device
+	
+	// Scan each network range
+	for i, network := range networkRanges {
+		log.Printf("Scanning network %d/%d: %s", i+1, len(networkRanges), network)
+		
+		// Validate each network before scanning
+		if err := s.Validator.ValidateNetworkRange(network); err != nil {
+			log.Printf("Invalid network CIDR %s: %v", network, err)
+			continue
+		}
+		
+		devices, err := s.ExecuteSweepScanCommand(network)
+		if err != nil {
+			log.Printf("Error executing sweep scan on %s: %v", network, err)
+			continue
+		}
+		
+		log.Printf("Network %s: found %d devices", network, len(devices))
+		allDevices = append(allDevices, devices...)
+	}
+	
+	log.Printf("Ping sweep found %d total devices from %d networks", len(allDevices), len(networkRanges))
 
 	// Update all devices and add eligible ones to port scan queue
-	for i, device := range devices {
-		log.Printf("Processing device %d/%d: %s", i+1, len(devices), device.IPv4)
+	for i, device := range allDevices {
+		log.Printf("Processing device %d/%d: %s", i+1, len(allDevices), device.IPv4)
 		// Use retry logic for updating device
 		updatedDevice, err := util.RetryOnLockWithResult(func() (*models.Device, error) {
 			return s.DeviceService.CreateOrUpdate(&device)
@@ -106,8 +141,7 @@ func (s *PingSweepService) Run() {
 		}
 	}
 
-	log.Printf("Ping sweep scan completed. Found %d devices.", len(devices))
-	log.Printf("Ping sweep scan completed. Found %d devices.", len(devices))
+	log.Printf("Ping sweep scan completed. Found %d devices across %d networks.", len(allDevices), len(networkRanges))
 }
 
 func (s *PingSweepService) ExecuteSweepScanCommand(network string) ([]models.Device, error) {
@@ -200,6 +234,11 @@ func (s *PingSweepService) tryNativeScanner(network string) ([]models.Device, er
 func (s *PingSweepService) tryNmapCommand(args []string) ([]models.Device, error) {
 	log.Printf("Trying nmap command: %s", strings.Join(args, " "))
 	
+	// Validate command arguments before execution
+	if err := s.Validator.SanitizeCommandArgs(args); err != nil {
+		return nil, fmt.Errorf("command validation failed: %w", err)
+	}
+	
 	cmd := exec.Command(args[0], args[1:]...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -239,8 +278,20 @@ func (s *PingSweepService) tryGetHostname(ip string) string {
 
 // tryNmapHostnameScan does a quick nmap scan focused on hostname resolution
 func (s *PingSweepService) tryNmapHostnameScan(ip string) string {
+	// Validate IP address first
+	if err := s.Validator.ValidateIPAddress(ip); err != nil {
+		log.Printf("Invalid IP address for hostname scan: %v", err)
+		return ""
+	}
+	
 	// Quick hostname-focused scan
-	cmd := exec.Command("nmap", "-sn", "-R", "--system-dns", "-oX", "-", ip)
+	args := []string{"nmap", "-sn", "-R", "--system-dns", "-oX", "-", ip}
+	if err := s.Validator.SanitizeCommandArgs(args); err != nil {
+		log.Printf("Command validation failed for hostname scan: %v", err)
+		return ""
+	}
+	
+	cmd := exec.Command(args[0], args[1:]...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return ""
@@ -257,8 +308,18 @@ func (s *PingSweepService) tryNmapHostnameScan(ip string) string {
 
 // tryDNSReverseLookup attempts reverse DNS lookup with timeout
 func (s *PingSweepService) tryDNSReverseLookup(ip string) string {
+	// Validate IP address first
+	if err := s.Validator.ValidateIPAddress(ip); err != nil {
+		return ""
+	}
+	
 	// Try using nslookup with a short timeout
-	cmd := exec.Command("timeout", "2", "nslookup", ip)
+	args := []string{"timeout", "2", "nslookup", ip}
+	if err := s.Validator.SanitizeCommandArgs(args); err != nil {
+		return ""
+	}
+	
+	cmd := exec.Command(args[0], args[1:]...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return ""
@@ -284,8 +345,18 @@ func (s *PingSweepService) tryDNSReverseLookup(ip string) string {
 
 // tryDigReverseLookup attempts reverse DNS lookup using dig
 func (s *PingSweepService) tryDigReverseLookup(ip string) string {
+	// Validate IP address first
+	if err := s.Validator.ValidateIPAddress(ip); err != nil {
+		return ""
+	}
+	
 	// Try using dig with a short timeout for reverse lookup
-	cmd := exec.Command("timeout", "2", "dig", "+short", "-x", ip)
+	args := []string{"timeout", "2", "dig", "+short", "-x", ip}
+	if err := s.Validator.SanitizeCommandArgs(args); err != nil {
+		return ""
+	}
+	
+	cmd := exec.Command(args[0], args[1:]...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return ""

@@ -26,16 +26,31 @@ func (r *SQLiteNetworkRepository) Close() error {
 
 // FindByID finds a network by ID
 func (r *SQLiteNetworkRepository) FindByID(ctx context.Context, id string) (*models.Network, error) {
-	query := `SELECT id, cidr FROM networks WHERE id = ?`
+	query := `SELECT id, cidr, COALESCE(name, ''), COALESCE(description, ''), COALESCE(enabled, 1), 
+	          COALESCE(scan_all_ports, 0), COALESCE(created_at, ''), COALESCE(updated_at, '') FROM networks WHERE id = ?`
 	row := r.db.QueryRowContext(ctx, query, id)
 
 	var network models.Network
-	err := row.Scan(&network.ID, &network.CIDR)
+	var createdAtStr, updatedAtStr string
+	err := row.Scan(&network.ID, &network.CIDR, &network.Name, &network.Description, 
+		&network.Enabled, &network.ScanAllPorts, &createdAtStr, &updatedAtStr)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, ErrNotFound
 		}
 		return nil, fmt.Errorf("error scanning network: %w", err)
+	}
+
+	// Parse timestamps if they exist
+	if createdAtStr != "" {
+		if parsed, err := time.Parse(time.RFC3339, createdAtStr); err == nil {
+			network.CreatedAt = parsed
+		}
+	}
+	if updatedAtStr != "" {
+		if parsed, err := time.Parse(time.RFC3339, updatedAtStr); err == nil {
+			network.UpdatedAt = parsed
+		}
 	}
 
 	return &network, nil
@@ -43,11 +58,14 @@ func (r *SQLiteNetworkRepository) FindByID(ctx context.Context, id string) (*mod
 
 // FindByCIDR finds a network by CIDR
 func (r *SQLiteNetworkRepository) FindByCIDR(ctx context.Context, cidr string) (*models.Network, error) {
-	query := `SELECT id, cidr FROM networks WHERE cidr = ?`
+	query := `SELECT id, cidr, COALESCE(name, ''), COALESCE(description, ''), COALESCE(enabled, 1), 
+	          COALESCE(scan_all_ports, 0), COALESCE(created_at, ''), COALESCE(updated_at, '') FROM networks WHERE cidr = ?`
 	row := r.db.QueryRowContext(ctx, query, cidr)
 
 	var network models.Network
-	err := row.Scan(&network.ID, &network.CIDR)
+	var createdAtStr, updatedAtStr string
+	err := row.Scan(&network.ID, &network.CIDR, &network.Name, &network.Description, 
+		&network.Enabled, &network.ScanAllPorts, &createdAtStr, &updatedAtStr)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, ErrNotFound
@@ -55,7 +73,115 @@ func (r *SQLiteNetworkRepository) FindByCIDR(ctx context.Context, cidr string) (
 		return nil, fmt.Errorf("error scanning network: %w", err)
 	}
 
+	// Parse timestamps if they exist
+	if createdAtStr != "" {
+		if parsed, err := time.Parse(time.RFC3339, createdAtStr); err == nil {
+			network.CreatedAt = parsed
+		}
+	}
+	if updatedAtStr != "" {
+		if parsed, err := time.Parse(time.RFC3339, updatedAtStr); err == nil {
+			network.UpdatedAt = parsed
+		}
+	}
+
 	return &network, nil
+}
+
+// FindAll returns all networks
+func (r *SQLiteNetworkRepository) FindAll(ctx context.Context) ([]*models.Network, error) {
+	query := `SELECT id, cidr, COALESCE(name, ''), COALESCE(description, ''), COALESCE(enabled, 1), 
+	          COALESCE(scan_all_ports, 0), COALESCE(created_at, ''), COALESCE(updated_at, '') FROM networks ORDER BY created_at DESC`
+	rows, err := r.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("error querying networks: %w", err)
+	}
+	defer rows.Close()
+
+	var networks []*models.Network
+	for rows.Next() {
+		var network models.Network
+		var createdAtStr, updatedAtStr string
+		err := rows.Scan(&network.ID, &network.CIDR, &network.Name, &network.Description,
+			&network.Enabled, &network.ScanAllPorts, &createdAtStr, &updatedAtStr)
+		if err != nil {
+			return nil, fmt.Errorf("error scanning network: %w", err)
+		}
+
+		// Parse timestamps if they exist
+		if createdAtStr != "" {
+			if parsed, err := time.Parse(time.RFC3339, createdAtStr); err == nil {
+				network.CreatedAt = parsed
+			}
+		}
+		if updatedAtStr != "" {
+			if parsed, err := time.Parse(time.RFC3339, updatedAtStr); err == nil {
+				network.UpdatedAt = parsed
+			}
+		}
+
+		networks = append(networks, &network)
+	}
+
+	return networks, nil
+}
+
+// FindByEnabled returns networks filtered by enabled status
+func (r *SQLiteNetworkRepository) FindByEnabled(ctx context.Context, enabled bool) ([]*models.Network, error) {
+	query := `SELECT id, cidr, COALESCE(name, ''), COALESCE(description, ''), COALESCE(enabled, 1), 
+	          COALESCE(scan_all_ports, 0), COALESCE(created_at, ''), COALESCE(updated_at, '') FROM networks WHERE enabled = ? ORDER BY created_at DESC`
+	rows, err := r.db.QueryContext(ctx, query, enabled)
+	if err != nil {
+		return nil, fmt.Errorf("error querying networks by enabled status: %w", err)
+	}
+	defer rows.Close()
+
+	var networks []*models.Network
+	for rows.Next() {
+		var network models.Network
+		var createdAtStr, updatedAtStr string
+		err := rows.Scan(&network.ID, &network.CIDR, &network.Name, &network.Description,
+			&network.Enabled, &network.ScanAllPorts, &createdAtStr, &updatedAtStr)
+		if err != nil {
+			return nil, fmt.Errorf("error scanning network: %w", err)
+		}
+
+		// Parse timestamps if they exist
+		if createdAtStr != "" {
+			if parsed, err := time.Parse(time.RFC3339, createdAtStr); err == nil {
+				network.CreatedAt = parsed
+			}
+		}
+		if updatedAtStr != "" {
+			if parsed, err := time.Parse(time.RFC3339, updatedAtStr); err == nil {
+				network.UpdatedAt = parsed
+			}
+		}
+
+		networks = append(networks, &network)
+	}
+
+	return networks, nil
+}
+
+// Delete removes a network by ID
+func (r *SQLiteNetworkRepository) Delete(ctx context.Context, id string) error {
+	query := `DELETE FROM networks WHERE id = ?`
+	result, err := r.db.ExecContext(ctx, query, id)
+	if err != nil {
+		return fmt.Errorf("error deleting network: %w", err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("error getting rows affected: %w", err)
+	}
+
+	if rowsAffected == 0 {
+		return ErrNotFound
+	}
+
+	return nil
 }
 
 // CreateOrUpdate creates or updates a network
@@ -69,15 +195,27 @@ func (r *SQLiteNetworkRepository) CreateOrUpdate(ctx context.Context, network *m
 		return nil, err
 	}
 
+	now := time.Now().Format(time.RFC3339)
+
 	if err == ErrNotFound {
-		query := `INSERT INTO networks (id, cidr) VALUES (?, ?)`
-		_, err := r.db.ExecContext(ctx, query, network.ID, network.CIDR)
+		// Set created timestamp if not set
+		if network.CreatedAt.IsZero() {
+			network.CreatedAt = time.Now()
+		}
+		network.UpdatedAt = time.Now()
+
+		query := `INSERT INTO networks (id, cidr, name, description, enabled, scan_all_ports, created_at, updated_at) 
+		          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+		_, err := r.db.ExecContext(ctx, query, network.ID, network.CIDR, network.Name, 
+			network.Description, network.Enabled, network.ScanAllPorts, network.CreatedAt.Format(time.RFC3339), now)
 		if err != nil {
 			return nil, fmt.Errorf("error inserting network: %w", err)
 		}
 	} else {
-		query := `UPDATE networks SET cidr = ? WHERE id = ?`
-		_, err := r.db.ExecContext(ctx, query, network.CIDR, network.ID)
+		network.UpdatedAt = time.Now()
+		query := `UPDATE networks SET cidr = ?, name = ?, description = ?, enabled = ?, scan_all_ports = ?, updated_at = ? WHERE id = ?`
+		_, err := r.db.ExecContext(ctx, query, network.CIDR, network.Name, 
+			network.Description, network.Enabled, network.ScanAllPorts, now, network.ID)
 		if err != nil {
 			return nil, fmt.Errorf("error updating network: %w", err)
 		}

@@ -11,7 +11,8 @@ import (
 )
 
 var (
-	ErrNotFound = errors.New("record not found")
+	ErrNotFound      = errors.New("record not found")
+	ErrAlreadyExists = errors.New("record already exists")
 )
 
 // Repository defines a common interface for all repositories
@@ -24,7 +25,10 @@ type NetworkRepository interface {
 	Repository
 	FindByID(ctx context.Context, id string) (*models.Network, error)
 	FindByCIDR(ctx context.Context, cidr string) (*models.Network, error)
+	FindAll(ctx context.Context) ([]*models.Network, error)
+	FindByEnabled(ctx context.Context, enabled bool) ([]*models.Network, error)
 	CreateOrUpdate(ctx context.Context, network *models.Network) (*models.Network, error)
+	Delete(ctx context.Context, id string) error
 }
 
 // DeviceRepository defines the interface for device operations

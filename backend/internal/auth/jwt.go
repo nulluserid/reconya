@@ -3,43 +3,26 @@ package auth
 import (
 	"encoding/json"
 	"net/http"
-	"time"
-
-	"reconya-ai/internal/config"
-
-	"github.com/dgrijalva/jwt-go"
 )
+
+// Stub auth handlers for proxy-based authentication
+// These endpoints return success to maintain frontend compatibility
+// while authentication is handled by the proxy layer
 
 type Credentials struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
 }
 
-type Claims struct {
-	Username string `json:"username"`
-	jwt.StandardClaims
-}
-
 type AuthHandlers struct {
-	Config *config.Config
+	// No config needed - proxy handles auth
 }
 
-func NewAuthHandlers(cfg *config.Config) *AuthHandlers {
-	return &AuthHandlers{Config: cfg}
+func NewAuthHandlers() *AuthHandlers {
+	return &AuthHandlers{}
 }
 
-func (h *AuthHandlers) GenerateJWT(username string) (string, error) {
-	expirationTime := time.Now().Add(3600 * time.Minute)
-	claims := &Claims{
-		Username: username,
-		StandardClaims: jwt.StandardClaims{
-			ExpiresAt: expirationTime.Unix(),
-		},
-	}
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	return token.SignedString(h.Config.JwtKey)
-}
-
+// LoginHandler - stub that returns success token for frontend compatibility
 func (h *AuthHandlers) LoginHandler(w http.ResponseWriter, r *http.Request) {
 	var creds Credentials
 	err := json.NewDecoder(r.Body).Decode(&creds)
@@ -48,48 +31,20 @@ func (h *AuthHandlers) LoginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if creds.Username != h.Config.Username || creds.Password != h.Config.Password {
-		w.WriteHeader(http.StatusUnauthorized)
-		return
-	}
-
-	tokenString, err := h.GenerateJWT(creds.Username)
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-
+	// Return a stub token - proxy handles real authentication
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{"token": tokenString})
+	json.NewEncoder(w).Encode(map[string]string{
+		"token": "proxy-authenticated",
+		"message": "Authentication handled by proxy",
+	})
 }
 
+// CheckAuthHandler - stub that always returns success since proxy handles auth
 func (h *AuthHandlers) CheckAuthHandler(w http.ResponseWriter, r *http.Request) {
-	authHeader := r.Header.Get("Authorization")
-	if authHeader == "" {
-		w.WriteHeader(http.StatusUnauthorized)
-		return
-	}
-
-	tokenStr := authHeader[len("Bearer "):]
-	claims := &Claims{}
-
-	token, err := jwt.ParseWithClaims(tokenStr, claims, func(token *jwt.Token) (interface{}, error) {
-		return h.Config.JwtKey, nil
-	})
-
-	if err != nil {
-		if err == jwt.ErrSignatureInvalid {
-			w.WriteHeader(http.StatusUnauthorized)
-			return
-		}
-		w.WriteHeader(http.StatusBadRequest)
-		return
-	}
-
-	if !token.Valid {
-		w.WriteHeader(http.StatusUnauthorized)
-		return
-	}
-
+	// Always return success since proxy has already authenticated the user
 	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{
+		"status": "authenticated",
+		"message": "Authentication handled by proxy",
+	})
 }
