@@ -317,7 +317,7 @@ After completing each development phase, follow this versioning workflow:
    git tag -a v0.0.X -m "Release v0.0.X: [Phase summary]"
    ```
 
-3. **Push to Remote**:
+3. **Push to Remote** (using SSH):
    ```bash
    git push origin master && git push origin v0.0.X
    ```
