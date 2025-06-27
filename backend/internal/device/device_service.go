@@ -475,3 +475,11 @@ func (s *DeviceService) PerformDeviceFingerprinting(device *models.Device) {
 	log.Printf("Starting device fingerprinting for %s", device.IPv4)
 	s.fingerprintService.AnalyzeDevice(device)
 }
+
+// SaveCertificate saves a certificate using the certificate repository
+func (s *DeviceService) SaveCertificate(certificate *models.Certificate) (*models.Certificate, error) {
+	certRepo := db.NewSQLiteCertificateRepository(s.dbManager.GetDB())
+	defer certRepo.Close()
+	
+	return certRepo.CreateOrUpdate(context.Background(), certificate)
+}

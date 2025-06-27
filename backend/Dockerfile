@@ -22,8 +22,8 @@ RUN CGO_ENABLED=1 GOOS=linux go build -o reconya-api ./cmd/main.go
 # Runtime stage
 FROM alpine:latest
 
-# Install runtime dependencies including sudo for nmap
-RUN apk add --no-cache ca-certificates tzdata sqlite nmap sudo chromium
+# Install runtime dependencies including sudo for nmap and SNMP tools
+RUN apk add --no-cache ca-certificates tzdata sqlite nmap sudo chromium net-snmp-tools
 RUN ln -s /usr/bin/chromium /usr/bin/google-chrome
 
 # Set working directory

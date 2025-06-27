@@ -6,10 +6,12 @@ import (
 	"log"
 	"net"
 	"os/exec"
+	"reconya-ai/internal/certificate"
 	"reconya-ai/internal/config"
 	"reconya-ai/internal/device"
 	"reconya-ai/internal/eventlog"
 	"reconya-ai/internal/network"
+	"reconya-ai/internal/snmp"
 	"reconya-ai/internal/util"
 	"reconya-ai/internal/webservice"
 	"reconya-ai/models"
@@ -18,20 +20,24 @@ import (
 )
 
 type PortScanService struct {
-	DeviceService   *device.DeviceService
-	EventLogService *eventlog.EventLogService
-	WebService      *webservice.WebService
-	NetworkService  *network.NetworkService
-	Config          *config.Config
+	DeviceService      *device.DeviceService
+	EventLogService    *eventlog.EventLogService
+	WebService         *webservice.WebService
+	NetworkService     *network.NetworkService
+	SNMPService        *snmp.SNMPService
+	CertificateService *certificate.CertificateService
+	Config             *config.Config
 }
 
 func NewPortScanService(deviceService *device.DeviceService, eventLogService *eventlog.EventLogService, networkService *network.NetworkService, cfg *config.Config) *PortScanService {
 	return &PortScanService{
-		DeviceService:   deviceService,
-		EventLogService: eventLogService,
-		WebService:      webservice.NewWebService(),
-		NetworkService:  networkService,
-		Config:          cfg,
+		DeviceService:      deviceService,
+		EventLogService:    eventLogService,
+		WebService:         webservice.NewWebService(),
+		NetworkService:     networkService,
+		SNMPService:        snmp.NewSNMPService(cfg),
+		CertificateService: certificate.NewCertificateService(cfg),
+		Config:             cfg,
 	}
 }
 
@@ -102,6 +108,14 @@ func (s *PortScanService) Run(requestedDevice models.Device) {
 		log.Printf("Starting web service scan with screenshots for IP [%s]", device.IPv4)
 		s.scanWebServicesWithScreenshots(updatedDevice)
 	}
+
+	// Perform SNMP scanning for additional device intelligence
+	log.Printf("Starting SNMP scan for IP [%s]", device.IPv4)
+	s.performSNMPScan(updatedDevice)
+
+	// Perform SSL/TLS certificate scanning
+	log.Printf("Starting certificate scan for IP [%s]", device.IPv4)
+	s.performCertificateScan(updatedDevice)
 	
 	// Use retry logic for creating event log
 	err = util.RetryOnLock(func() error {
@@ -239,6 +253,221 @@ func (s *PortScanService) determineScanMode(ipv4 string) (bool, error) {
 	// If no network found in database, fall back to global config
 	log.Printf("IP %s not found in any configured network, using global config", ipv4)
 	return s.Config.ScanAllPorts, nil
+}
+
+// performSNMPScan performs SNMP scanning on a device for enhanced intelligence gathering
+func (s *PortScanService) performSNMPScan(device *models.Device) {
+	if device == nil {
+		return
+	}
+
+	// Quick check if device likely supports SNMP to avoid long timeouts
+	if !s.SNMPService.IsDeviceSNMPEnabled(context.Background(), device.IPv4) {
+		log.Printf("Device %s does not appear to support SNMP, skipping detailed scan", device.IPv4)
+		return
+	}
+
+	log.Printf("Performing SNMP scan for device %s", device.IPv4)
+	startTime := time.Now()
+
+	snmpData, err := s.SNMPService.ScanDevice(context.Background(), device.IPv4)
+	if err != nil {
+		log.Printf("SNMP scan failed for device %s: %v", device.IPv4, err)
+		return
+	}
+
+	// Associate SNMP data with device
+	snmpData.DeviceID = device.ID
+	device.SNMPData = snmpData
+
+	// Save updated device with SNMP data
+	_, err = util.RetryOnLockWithResult(func() (*models.Device, error) {
+		return s.DeviceService.CreateOrUpdate(device)
+	})
+
+	if err != nil {
+		log.Printf("Error saving device with SNMP data: %v", err)
+		return
+	}
+
+	duration := time.Since(startTime)
+	log.Printf("SNMP scan completed for device %s in %v", device.IPv4, duration)
+	log.Printf("SNMP Details - System: %s, Description: %s, Community: %s, Interfaces: %d",
+		snmpData.SystemName, snmpData.SystemDescr, snmpData.Community, len(snmpData.Interfaces))
+
+	// Enhance device identification based on SNMP data
+	s.enhanceDeviceFromSNMP(device, snmpData)
+}
+
+// enhanceDeviceFromSNMP enhances device information based on SNMP data
+func (s *PortScanService) enhanceDeviceFromSNMP(device *models.Device, snmpData *models.SNMPData) {
+	updated := false
+
+	// Update hostname if we have a better one from SNMP
+	if snmpData.SystemName != "" && (device.Hostname == nil || *device.Hostname == "") {
+		device.Hostname = &snmpData.SystemName
+		updated = true
+		log.Printf("Updated hostname for %s from SNMP: %s", device.IPv4, snmpData.SystemName)
+	}
+
+	// Update vendor information if available and not already set
+	if device.Vendor == nil || *device.Vendor == "" {
+		if vendor := s.extractVendorFromSNMP(snmpData); vendor != "" {
+			device.Vendor = &vendor
+			updated = true
+			log.Printf("Updated vendor for %s from SNMP: %s", device.IPv4, vendor)
+		}
+	}
+
+	// Enhance device type classification based on SNMP data
+	if deviceType := s.classifyDeviceFromSNMP(snmpData); deviceType != models.DeviceTypeUnknown && device.DeviceType == models.DeviceTypeUnknown {
+		device.DeviceType = deviceType
+		updated = true
+		log.Printf("Updated device type for %s from SNMP: %s", device.IPv4, deviceType)
+	}
+
+	// Save updates if any changes were made
+	if updated {
+		_, err := util.RetryOnLockWithResult(func() (*models.Device, error) {
+			return s.DeviceService.CreateOrUpdate(device)
+		})
+		if err != nil {
+			log.Printf("Error saving enhanced device data: %v", err)
+		}
+	}
+}
+
+// extractVendorFromSNMP extracts vendor information from SNMP data
+func (s *PortScanService) extractVendorFromSNMP(snmpData *models.SNMPData) string {
+	// Try to extract vendor from system description
+	if snmpData.SystemDescr != "" {
+		desc := strings.ToLower(snmpData.SystemDescr)
+		
+		// Common vendor patterns in system descriptions
+		vendors := []string{"cisco", "hp", "dell", "netgear", "linksys", "d-link", "tplink", "ubiquiti", "juniper", "fortinet"}
+		for _, vendor := range vendors {
+			if strings.Contains(desc, vendor) {
+				return strings.Title(vendor)
+			}
+		}
+	}
+
+	// Try to extract from system object ID
+	if snmpData.SystemObjectID != "" {
+		// Map common enterprise OIDs to vendors
+		oidVendors := map[string]string{
+			"1.3.6.1.4.1.9":     "Cisco",
+			"1.3.6.1.4.1.11":    "HP",
+			"1.3.6.1.4.1.674":   "Dell",
+			"1.3.6.1.4.1.4526":  "Netgear",
+			"1.3.6.1.4.1.3955":  "Linksys",
+			"1.3.6.1.4.1.171":   "D-Link",
+			"1.3.6.1.4.1.41112": "Ubiquiti",
+			"1.3.6.1.4.1.2636":  "Juniper",
+		}
+
+		for oid, vendor := range oidVendors {
+			if strings.HasPrefix(snmpData.SystemObjectID, oid) {
+				return vendor
+			}
+		}
+	}
+
+	return ""
+}
+
+// classifyDeviceFromSNMP classifies device type based on SNMP data
+func (s *PortScanService) classifyDeviceFromSNMP(snmpData *models.SNMPData) models.DeviceType {
+	if snmpData.SystemDescr == "" {
+		return models.DeviceTypeUnknown
+	}
+
+	desc := strings.ToLower(snmpData.SystemDescr)
+
+	// Router patterns
+	if strings.Contains(desc, "router") || strings.Contains(desc, "gateway") {
+		return models.DeviceTypeRouter
+	}
+
+	// Switch patterns
+	if strings.Contains(desc, "switch") || strings.Contains(desc, "switching") {
+		return models.DeviceTypeSwitch
+	}
+
+	// Access Point patterns
+	if strings.Contains(desc, "access point") || strings.Contains(desc, "wireless") || strings.Contains(desc, "wifi") {
+		return models.DeviceTypeAccessPoint
+	}
+
+	// Firewall patterns
+	if strings.Contains(desc, "firewall") || strings.Contains(desc, "security") {
+		return models.DeviceTypeFirewall
+	}
+
+	// Printer patterns
+	if strings.Contains(desc, "printer") || strings.Contains(desc, "print") {
+		return models.DeviceTypePrinter
+	}
+
+	// NAS patterns
+	if strings.Contains(desc, "nas") || strings.Contains(desc, "storage") || strings.Contains(desc, "file server") {
+		return models.DeviceTypeNAS
+	}
+
+	// Server patterns
+	if strings.Contains(desc, "server") || strings.Contains(desc, "linux") || strings.Contains(desc, "windows server") {
+		return models.DeviceTypeServer
+	}
+
+	// Camera patterns
+	if strings.Contains(desc, "camera") || strings.Contains(desc, "video") || strings.Contains(desc, "surveillance") {
+		return models.DeviceTypeCamera
+	}
+
+	return models.DeviceTypeUnknown
+}
+
+// performCertificateScan performs SSL/TLS certificate scanning for a device
+func (s *PortScanService) performCertificateScan(device *models.Device) {
+	if device == nil || len(device.Ports) == 0 {
+		return
+	}
+
+	log.Printf("Performing certificate scan for device %s", device.IPv4)
+	startTime := time.Now()
+
+	certificates, err := s.CertificateService.ScanDeviceCertificates(context.Background(), device.IPv4, device.Ports)
+	if err != nil {
+		log.Printf("Certificate scan failed for device %s: %v", device.IPv4, err)
+		return
+	}
+
+	if len(certificates) == 0 {
+		log.Printf("No certificates found on device %s", device.IPv4)
+		return
+	}
+
+	// Save certificates using the certificate service/repository
+	for _, cert := range certificates {
+		cert.DeviceID = device.ID
+		
+		// Save each certificate individually
+		_, err := s.DeviceService.SaveCertificate(cert)
+		if err != nil {
+			log.Printf("Error saving certificate for device %s: %v", device.IPv4, err)
+			continue
+		}
+	}
+
+	duration := time.Since(startTime)
+	log.Printf("Certificate scan completed for device %s in %v. Found %d certificates", device.IPv4, duration, len(certificates))
+	
+	// Log certificate details
+	for _, cert := range certificates {
+		log.Printf("Certificate found on %s:%d - Subject: %s, Issuer: %s, Security: %s, Expires: %s",
+			device.IPv4, cert.Port, cert.Subject.CommonName, cert.Issuer.CommonName, 
+			cert.SecurityLevel, cert.NotAfter.Format("2006-01-02"))
+	}
 }
 
 // scanWebServices scans for web services on the device and updates the device with web info (no screenshots)

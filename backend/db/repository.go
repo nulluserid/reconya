@@ -57,6 +57,48 @@ type SystemStatusRepository interface {
 	FindLatest(ctx context.Context) (*models.SystemStatus, error)
 }
 
+// SNMPDataRepository defines the interface for SNMP data operations
+type SNMPDataRepository interface {
+	Repository
+	FindByDeviceID(ctx context.Context, deviceID string) (*models.SNMPData, error)
+	CreateOrUpdate(ctx context.Context, snmpData *models.SNMPData) (*models.SNMPData, error)
+	Delete(ctx context.Context, id string) error
+	FindAll(ctx context.Context) ([]*models.SNMPData, error)
+}
+
+// CertificateRepository defines the interface for certificate operations
+type CertificateRepository interface {
+	Repository
+	FindByDeviceID(ctx context.Context, deviceID string) ([]*models.Certificate, error)
+	FindByThumbprint(ctx context.Context, thumbprint string) (*models.Certificate, error)
+	FindExpiring(ctx context.Context, days int) ([]*models.Certificate, error)
+	FindExpired(ctx context.Context) ([]*models.Certificate, error)
+	CreateOrUpdate(ctx context.Context, certificate *models.Certificate) (*models.Certificate, error)
+	Delete(ctx context.Context, id string) error
+	FindAll(ctx context.Context) ([]*models.Certificate, error)
+	GetStats(ctx context.Context) (*models.CertificateStats, error)
+}
+
+// TopologyRepository defines the interface for network topology operations
+type TopologyRepository interface {
+	Repository
+	FindLatest(ctx context.Context) (*models.NetworkTopology, error)
+	CreateOrUpdate(ctx context.Context, topology *models.NetworkTopology) (*models.NetworkTopology, error)
+	FindByLocalSubnet(ctx context.Context, subnet string) (*models.NetworkTopology, error)
+	GetTopologyStats(ctx context.Context) (*models.TopologyStats, error)
+}
+
+// GatewayRepository defines the interface for gateway operations
+type GatewayRepository interface {
+	Repository
+	FindByIP(ctx context.Context, ip string) (*models.Gateway, error)
+	FindAll(ctx context.Context) ([]*models.Gateway, error)
+	FindDefault(ctx context.Context) (*models.Gateway, error)
+	CreateOrUpdate(ctx context.Context, gateway *models.Gateway) (*models.Gateway, error)
+	Delete(ctx context.Context, id string) error
+	UpdateLastSeen(ctx context.Context, ip string, timestamp time.Time) error
+}
+
 // RepositoryFactory creates repositories
 type RepositoryFactory struct {
 	SQLiteDB *sql.DB
@@ -89,6 +131,26 @@ func (f *RepositoryFactory) NewEventLogRepository() EventLogRepository {
 // NewSystemStatusRepository creates a new system status repository
 func (f *RepositoryFactory) NewSystemStatusRepository() SystemStatusRepository {
 	return NewSQLiteSystemStatusRepository(f.SQLiteDB)
+}
+
+// NewSNMPDataRepository creates a new SNMP data repository
+func (f *RepositoryFactory) NewSNMPDataRepository() SNMPDataRepository {
+	return NewSQLiteSNMPDataRepository(f.SQLiteDB)
+}
+
+// NewCertificateRepository creates a new certificate repository
+func (f *RepositoryFactory) NewCertificateRepository() CertificateRepository {
+	return NewSQLiteCertificateRepository(f.SQLiteDB)
+}
+
+// NewTopologyRepository creates a new topology repository
+func (f *RepositoryFactory) NewTopologyRepository() TopologyRepository {
+	return NewSQLiteTopologyRepository(f.SQLiteDB)
+}
+
+// NewGatewayRepository creates a new gateway repository
+func (f *RepositoryFactory) NewGatewayRepository() GatewayRepository {
+	return NewSQLiteGatewayRepository(f.SQLiteDB)
 }
 
 // GenerateID generates a unique ID for a record

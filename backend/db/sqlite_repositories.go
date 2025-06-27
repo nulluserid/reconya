@@ -4,8 +4,10 @@ package db
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"reconya-ai/models"
+	"strconv"
 	"time"
 )
 
@@ -950,4 +952,910 @@ func nullableInt64(i *int64) sql.NullInt64 {
 		return sql.NullInt64{}
 	}
 	return sql.NullInt64{Int64: *i, Valid: true}
+}
+
+// SQLiteSNMPDataRepository implements the SNMPDataRepository interface for SQLite
+type SQLiteSNMPDataRepository struct {
+	db *sql.DB
+}
+
+// NewSQLiteSNMPDataRepository creates a new SQLiteSNMPDataRepository
+func NewSQLiteSNMPDataRepository(db *sql.DB) *SQLiteSNMPDataRepository {
+	return &SQLiteSNMPDataRepository{db: db}
+}
+
+// Close closes the database connection
+func (r *SQLiteSNMPDataRepository) Close() error {
+	return r.db.Close()
+}
+
+// FindByDeviceID finds SNMP data by device ID
+func (r *SQLiteSNMPDataRepository) FindByDeviceID(ctx context.Context, deviceID string) (*models.SNMPData, error) {
+	query := `SELECT id, device_id, COALESCE(system_name, ''), COALESCE(system_descr, ''), 
+	          COALESCE(system_object_id, ''), COALESCE(system_contact, ''), COALESCE(system_location, ''),
+	          system_uptime, interface_count, COALESCE(interfaces, '[]'), COALESCE(community, ''),
+	          COALESCE(version, ''), COALESCE(custom_oids, '{}'), last_scanned, scan_duration,
+	          created_at, updated_at FROM snmp_data WHERE device_id = ?`
+	
+	row := r.db.QueryRowContext(ctx, query, deviceID)
+	return r.scanSNMPData(row)
+}
+
+// CreateOrUpdate creates or updates SNMP data
+func (r *SQLiteSNMPDataRepository) CreateOrUpdate(ctx context.Context, snmpData *models.SNMPData) (*models.SNMPData, error) {
+	if snmpData.ID == "" {
+		snmpData.ID = GenerateID()
+	}
+
+	// Marshal interfaces to JSON
+	interfacesJSON, err := json.Marshal(snmpData.Interfaces)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal interfaces: %w", err)
+	}
+
+	// Marshal custom OIDs to JSON
+	customOIDsJSON, err := json.Marshal(snmpData.CustomOIDs)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal custom OIDs: %w", err)
+	}
+
+	snmpData.UpdatedAt = time.Now()
+	if snmpData.CreatedAt.IsZero() {
+		snmpData.CreatedAt = time.Now()
+	}
+
+	// Check if record exists
+	existing, err := r.FindByDeviceID(ctx, snmpData.DeviceID)
+	if err != nil && err != ErrNotFound {
+		return nil, err
+	}
+
+	if existing != nil {
+		// Update existing record
+		snmpData.ID = existing.ID
+		query := `UPDATE snmp_data SET system_name = ?, system_descr = ?, system_object_id = ?,
+		          system_contact = ?, system_location = ?, system_uptime = ?, interface_count = ?,
+		          interfaces = ?, community = ?, version = ?, custom_oids = ?, last_scanned = ?,
+		          scan_duration = ?, updated_at = ? WHERE id = ?`
+		
+		_, err = r.db.ExecContext(ctx, query,
+			snmpData.SystemName, snmpData.SystemDescr, snmpData.SystemObjectID,
+			snmpData.SystemContact, snmpData.SystemLocation, snmpData.SystemUptime,
+			snmpData.InterfaceCount, string(interfacesJSON), snmpData.Community,
+			snmpData.Version, string(customOIDsJSON), snmpData.LastScanned,
+			int64(snmpData.ScanDuration), snmpData.UpdatedAt, snmpData.ID)
+	} else {
+		// Insert new record
+		query := `INSERT INTO snmp_data (id, device_id, system_name, system_descr, system_object_id,
+		          system_contact, system_location, system_uptime, interface_count, interfaces,
+		          community, version, custom_oids, last_scanned, scan_duration, created_at, updated_at)
+		          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+		
+		_, err = r.db.ExecContext(ctx, query,
+			snmpData.ID, snmpData.DeviceID, snmpData.SystemName, snmpData.SystemDescr,
+			snmpData.SystemObjectID, snmpData.SystemContact, snmpData.SystemLocation,
+			snmpData.SystemUptime, snmpData.InterfaceCount, string(interfacesJSON),
+			snmpData.Community, snmpData.Version, string(customOIDsJSON),
+			snmpData.LastScanned, int64(snmpData.ScanDuration), snmpData.CreatedAt, snmpData.UpdatedAt)
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to save SNMP data: %w", err)
+	}
+
+	return snmpData, nil
+}
+
+// Delete removes SNMP data by ID
+func (r *SQLiteSNMPDataRepository) Delete(ctx context.Context, id string) error {
+	query := `DELETE FROM snmp_data WHERE id = ?`
+	result, err := r.db.ExecContext(ctx, query, id)
+	if err != nil {
+		return fmt.Errorf("failed to delete SNMP data: %w", err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get rows affected: %w", err)
+	}
+
+	if rowsAffected == 0 {
+		return ErrNotFound
+	}
+
+	return nil
+}
+
+// FindAll returns all SNMP data
+func (r *SQLiteSNMPDataRepository) FindAll(ctx context.Context) ([]*models.SNMPData, error) {
+	query := `SELECT id, device_id, COALESCE(system_name, ''), COALESCE(system_descr, ''), 
+	          COALESCE(system_object_id, ''), COALESCE(system_contact, ''), COALESCE(system_location, ''),
+	          system_uptime, interface_count, COALESCE(interfaces, '[]'), COALESCE(community, ''),
+	          COALESCE(version, ''), COALESCE(custom_oids, '{}'), last_scanned, scan_duration,
+	          created_at, updated_at FROM snmp_data ORDER BY last_scanned DESC`
+	
+	rows, err := r.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query SNMP data: %w", err)
+	}
+	defer rows.Close()
+
+	var snmpDataList []*models.SNMPData
+	for rows.Next() {
+		snmpData, err := r.scanSNMPData(rows)
+		if err != nil {
+			return nil, err
+		}
+		snmpDataList = append(snmpDataList, snmpData)
+	}
+
+	return snmpDataList, nil
+}
+
+// scanSNMPData scans a row into an SNMPData struct
+func (r *SQLiteSNMPDataRepository) scanSNMPData(scanner interface{}) (*models.SNMPData, error) {
+	var snmpData models.SNMPData
+	var interfacesJSON, customOIDsJSON string
+	var systemUptime sql.NullInt64
+	var interfaceCount sql.NullInt32
+	var scanDuration int64
+
+	var err error
+	switch s := scanner.(type) {
+	case *sql.Row:
+		err = s.Scan(&snmpData.ID, &snmpData.DeviceID, &snmpData.SystemName, &snmpData.SystemDescr,
+			&snmpData.SystemObjectID, &snmpData.SystemContact, &snmpData.SystemLocation,
+			&systemUptime, &interfaceCount, &interfacesJSON, &snmpData.Community,
+			&snmpData.Version, &customOIDsJSON, &snmpData.LastScanned, &scanDuration,
+			&snmpData.CreatedAt, &snmpData.UpdatedAt)
+	case *sql.Rows:
+		err = s.Scan(&snmpData.ID, &snmpData.DeviceID, &snmpData.SystemName, &snmpData.SystemDescr,
+			&snmpData.SystemObjectID, &snmpData.SystemContact, &snmpData.SystemLocation,
+			&systemUptime, &interfaceCount, &interfacesJSON, &snmpData.Community,
+			&snmpData.Version, &customOIDsJSON, &snmpData.LastScanned, &scanDuration,
+			&snmpData.CreatedAt, &snmpData.UpdatedAt)
+	default:
+		return nil, fmt.Errorf("unsupported scanner type")
+	}
+
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("failed to scan SNMP data: %w", err)
+	}
+
+	// Convert nullable fields
+	if systemUptime.Valid {
+		snmpData.SystemUptime = &systemUptime.Int64
+	}
+	if interfaceCount.Valid {
+		count := int(interfaceCount.Int32)
+		snmpData.InterfaceCount = &count
+	}
+	snmpData.ScanDuration = time.Duration(scanDuration)
+
+	// Unmarshal JSON fields
+	if interfacesJSON != "" && interfacesJSON != "[]" {
+		if err := json.Unmarshal([]byte(interfacesJSON), &snmpData.Interfaces); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal interfaces: %w", err)
+		}
+	}
+
+	if customOIDsJSON != "" && customOIDsJSON != "{}" {
+		if err := json.Unmarshal([]byte(customOIDsJSON), &snmpData.CustomOIDs); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal custom OIDs: %w", err)
+		}
+	}
+
+	// Initialize maps if nil
+	if snmpData.CustomOIDs == nil {
+		snmpData.CustomOIDs = make(map[string]string)
+	}
+
+	return &snmpData, nil
+}
+
+// SQLiteCertificateRepository implements the CertificateRepository interface for SQLite
+type SQLiteCertificateRepository struct {
+	db *sql.DB
+}
+
+// NewSQLiteCertificateRepository creates a new SQLiteCertificateRepository
+func NewSQLiteCertificateRepository(db *sql.DB) *SQLiteCertificateRepository {
+	return &SQLiteCertificateRepository{db: db}
+}
+
+// Close closes the database connection
+func (r *SQLiteCertificateRepository) Close() error {
+	return r.db.Close()
+}
+
+// FindByDeviceID finds certificates by device ID
+func (r *SQLiteCertificateRepository) FindByDeviceID(ctx context.Context, deviceID string) ([]*models.Certificate, error) {
+	query := `SELECT id, device_id, host, port, protocol, COALESCE(subject_common_name, ''),
+	          COALESCE(issuer_common_name, ''), serial_number, thumbprint, thumbprint_sha256,
+	          version, signature_algorithm, public_key_algorithm, key_size, not_before, not_after,
+	          is_ca, is_self_signed, is_valid, is_expired, is_expiring_soon, 
+	          COALESCE(tls_version, ''), COALESCE(cipher_suite, ''), COALESCE(security_level, ''),
+	          last_scanned, first_seen, created_at, updated_at
+	          FROM certificates WHERE device_id = ? ORDER BY last_scanned DESC`
+	
+	rows, err := r.db.QueryContext(ctx, query, deviceID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query certificates: %w", err)
+	}
+	defer rows.Close()
+
+	var certificates []*models.Certificate
+	for rows.Next() {
+		cert, err := r.scanCertificate(rows)
+		if err != nil {
+			return nil, err
+		}
+		certificates = append(certificates, cert)
+	}
+
+	return certificates, nil
+}
+
+// FindByThumbprint finds a certificate by thumbprint
+func (r *SQLiteCertificateRepository) FindByThumbprint(ctx context.Context, thumbprint string) (*models.Certificate, error) {
+	query := `SELECT id, device_id, host, port, protocol, COALESCE(subject_common_name, ''),
+	          COALESCE(issuer_common_name, ''), serial_number, thumbprint, thumbprint_sha256,
+	          version, signature_algorithm, public_key_algorithm, key_size, not_before, not_after,
+	          is_ca, is_self_signed, is_valid, is_expired, is_expiring_soon, 
+	          COALESCE(tls_version, ''), COALESCE(cipher_suite, ''), COALESCE(security_level, ''),
+	          last_scanned, first_seen, created_at, updated_at
+	          FROM certificates WHERE thumbprint = ?`
+	
+	row := r.db.QueryRowContext(ctx, query, thumbprint)
+	return r.scanCertificate(row)
+}
+
+// FindExpiring finds certificates expiring within the specified number of days
+func (r *SQLiteCertificateRepository) FindExpiring(ctx context.Context, days int) ([]*models.Certificate, error) {
+	query := `SELECT id, device_id, host, port, protocol, COALESCE(subject_common_name, ''),
+	          COALESCE(issuer_common_name, ''), serial_number, thumbprint, thumbprint_sha256,
+	          version, signature_algorithm, public_key_algorithm, key_size, not_before, not_after,
+	          is_ca, is_self_signed, is_valid, is_expired, is_expiring_soon, 
+	          COALESCE(tls_version, ''), COALESCE(cipher_suite, ''), COALESCE(security_level, ''),
+	          last_scanned, first_seen, created_at, updated_at
+	          FROM certificates WHERE not_after <= datetime('now', '+' || ? || ' days') 
+	          AND not_after > datetime('now') ORDER BY not_after ASC`
+	
+	rows, err := r.db.QueryContext(ctx, query, days)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query expiring certificates: %w", err)
+	}
+	defer rows.Close()
+
+	var certificates []*models.Certificate
+	for rows.Next() {
+		cert, err := r.scanCertificate(rows)
+		if err != nil {
+			return nil, err
+		}
+		certificates = append(certificates, cert)
+	}
+
+	return certificates, nil
+}
+
+// FindExpired finds expired certificates
+func (r *SQLiteCertificateRepository) FindExpired(ctx context.Context) ([]*models.Certificate, error) {
+	query := `SELECT id, device_id, host, port, protocol, COALESCE(subject_common_name, ''),
+	          COALESCE(issuer_common_name, ''), serial_number, thumbprint, thumbprint_sha256,
+	          version, signature_algorithm, public_key_algorithm, key_size, not_before, not_after,
+	          is_ca, is_self_signed, is_valid, is_expired, is_expiring_soon, 
+	          COALESCE(tls_version, ''), COALESCE(cipher_suite, ''), COALESCE(security_level, ''),
+	          last_scanned, first_seen, created_at, updated_at
+	          FROM certificates WHERE not_after < datetime('now') ORDER BY not_after DESC`
+	
+	rows, err := r.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query expired certificates: %w", err)
+	}
+	defer rows.Close()
+
+	var certificates []*models.Certificate
+	for rows.Next() {
+		cert, err := r.scanCertificate(rows)
+		if err != nil {
+			return nil, err
+		}
+		certificates = append(certificates, cert)
+	}
+
+	return certificates, nil
+}
+
+// CreateOrUpdate creates or updates a certificate
+func (r *SQLiteCertificateRepository) CreateOrUpdate(ctx context.Context, certificate *models.Certificate) (*models.Certificate, error) {
+	if certificate.ID == "" {
+		certificate.ID = GenerateID()
+	}
+
+	certificate.UpdatedAt = time.Now()
+	if certificate.CreatedAt.IsZero() {
+		certificate.CreatedAt = time.Now()
+	}
+
+	// Check if certificate exists by thumbprint
+	existing, err := r.FindByThumbprint(ctx, certificate.Thumbprint)
+	if err != nil && err != ErrNotFound {
+		return nil, err
+	}
+
+	if existing != nil {
+		// Update existing certificate
+		certificate.ID = existing.ID
+		certificate.FirstSeen = existing.FirstSeen // Preserve first seen
+		
+		query := `UPDATE certificates SET device_id = ?, host = ?, port = ?, protocol = ?,
+		          subject_common_name = ?, issuer_common_name = ?, serial_number = ?,
+		          thumbprint_sha256 = ?, version = ?, signature_algorithm = ?, public_key_algorithm = ?,
+		          key_size = ?, not_before = ?, not_after = ?, is_ca = ?, is_self_signed = ?,
+		          is_valid = ?, is_expired = ?, is_expiring_soon = ?, tls_version = ?,
+		          cipher_suite = ?, security_level = ?, last_scanned = ?, updated_at = ?
+		          WHERE id = ?`
+		
+		_, err = r.db.ExecContext(ctx, query,
+			certificate.DeviceID, certificate.Host, certificate.Port, certificate.Protocol,
+			certificate.Subject.CommonName, certificate.Issuer.CommonName, certificate.SerialNumber,
+			certificate.ThumbprintSHA256, certificate.Version, certificate.SignatureAlgorithm,
+			certificate.PublicKeyAlgorithm, certificate.KeySize, certificate.NotBefore, certificate.NotAfter,
+			certificate.IsCA, certificate.IsSelfSigned, certificate.IsValid, certificate.IsExpired,
+			certificate.IsExpiringSoon, certificate.TLSVersion, certificate.CipherSuite,
+			string(certificate.SecurityLevel), certificate.LastScanned, certificate.UpdatedAt,
+			certificate.ID)
+	} else {
+		// Insert new certificate
+		if certificate.FirstSeen.IsZero() {
+			certificate.FirstSeen = time.Now()
+		}
+		
+		query := `INSERT INTO certificates (id, device_id, host, port, protocol, subject_common_name,
+		          issuer_common_name, serial_number, thumbprint, thumbprint_sha256, version,
+		          signature_algorithm, public_key_algorithm, key_size, not_before, not_after,
+		          is_ca, is_self_signed, is_valid, is_expired, is_expiring_soon, tls_version,
+		          cipher_suite, security_level, last_scanned, first_seen, created_at, updated_at)
+		          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+		
+		_, err = r.db.ExecContext(ctx, query,
+			certificate.ID, certificate.DeviceID, certificate.Host, certificate.Port, certificate.Protocol,
+			certificate.Subject.CommonName, certificate.Issuer.CommonName, certificate.SerialNumber,
+			certificate.Thumbprint, certificate.ThumbprintSHA256, certificate.Version,
+			certificate.SignatureAlgorithm, certificate.PublicKeyAlgorithm, certificate.KeySize,
+			certificate.NotBefore, certificate.NotAfter, certificate.IsCA, certificate.IsSelfSigned,
+			certificate.IsValid, certificate.IsExpired, certificate.IsExpiringSoon, certificate.TLSVersion,
+			certificate.CipherSuite, string(certificate.SecurityLevel), certificate.LastScanned,
+			certificate.FirstSeen, certificate.CreatedAt, certificate.UpdatedAt)
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to save certificate: %w", err)
+	}
+
+	return certificate, nil
+}
+
+// Delete removes a certificate by ID
+func (r *SQLiteCertificateRepository) Delete(ctx context.Context, id string) error {
+	query := `DELETE FROM certificates WHERE id = ?`
+	result, err := r.db.ExecContext(ctx, query, id)
+	if err != nil {
+		return fmt.Errorf("failed to delete certificate: %w", err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get rows affected: %w", err)
+	}
+
+	if rowsAffected == 0 {
+		return ErrNotFound
+	}
+
+	return nil
+}
+
+// FindAll returns all certificates
+func (r *SQLiteCertificateRepository) FindAll(ctx context.Context) ([]*models.Certificate, error) {
+	query := `SELECT id, device_id, host, port, protocol, COALESCE(subject_common_name, ''),
+	          COALESCE(issuer_common_name, ''), serial_number, thumbprint, thumbprint_sha256,
+	          version, signature_algorithm, public_key_algorithm, key_size, not_before, not_after,
+	          is_ca, is_self_signed, is_valid, is_expired, is_expiring_soon, 
+	          COALESCE(tls_version, ''), COALESCE(cipher_suite, ''), COALESCE(security_level, ''),
+	          last_scanned, first_seen, created_at, updated_at
+	          FROM certificates ORDER BY last_scanned DESC`
+	
+	rows, err := r.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query all certificates: %w", err)
+	}
+	defer rows.Close()
+
+	var certificates []*models.Certificate
+	for rows.Next() {
+		cert, err := r.scanCertificate(rows)
+		if err != nil {
+			return nil, err
+		}
+		certificates = append(certificates, cert)
+	}
+
+	return certificates, nil
+}
+
+// GetStats returns certificate statistics
+func (r *SQLiteCertificateRepository) GetStats(ctx context.Context) (*models.CertificateStats, error) {
+	stats := &models.CertificateStats{
+		SecurityLevelCounts:   make(map[models.SecurityLevel]int),
+		CommonIssuers:        make(map[string]int),
+		AlgorithmDistribution: make(map[string]int),
+	}
+
+	// Total certificates
+	err := r.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM certificates").Scan(&stats.TotalCertificates)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get total certificates: %w", err)
+	}
+
+	// Valid certificates
+	err = r.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM certificates WHERE is_valid = 1").Scan(&stats.ValidCertificates)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get valid certificates: %w", err)
+	}
+
+	// Expired certificates
+	err = r.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM certificates WHERE is_expired = 1").Scan(&stats.ExpiredCertificates)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get expired certificates: %w", err)
+	}
+
+	// Expiring soon
+	err = r.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM certificates WHERE is_expiring_soon = 1").Scan(&stats.ExpiringSoonCount)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get expiring soon certificates: %w", err)
+	}
+
+	// Self-signed
+	err = r.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM certificates WHERE is_self_signed = 1").Scan(&stats.SelfSignedCount)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get self-signed certificates: %w", err)
+	}
+
+	return stats, nil
+}
+
+// scanCertificate scans a row into a Certificate struct
+func (r *SQLiteCertificateRepository) scanCertificate(scanner interface{}) (*models.Certificate, error) {
+	var cert models.Certificate
+
+	var err error
+	switch s := scanner.(type) {
+	case *sql.Row:
+		err = s.Scan(&cert.ID, &cert.DeviceID, &cert.Host, &cert.Port, &cert.Protocol,
+			&cert.Subject.CommonName, &cert.Issuer.CommonName, &cert.SerialNumber,
+			&cert.Thumbprint, &cert.ThumbprintSHA256, &cert.Version, &cert.SignatureAlgorithm,
+			&cert.PublicKeyAlgorithm, &cert.KeySize, &cert.NotBefore, &cert.NotAfter,
+			&cert.IsCA, &cert.IsSelfSigned, &cert.IsValid, &cert.IsExpired, &cert.IsExpiringSoon,
+			&cert.TLSVersion, &cert.CipherSuite, &cert.SecurityLevel,
+			&cert.LastScanned, &cert.FirstSeen, &cert.CreatedAt, &cert.UpdatedAt)
+	case *sql.Rows:
+		err = s.Scan(&cert.ID, &cert.DeviceID, &cert.Host, &cert.Port, &cert.Protocol,
+			&cert.Subject.CommonName, &cert.Issuer.CommonName, &cert.SerialNumber,
+			&cert.Thumbprint, &cert.ThumbprintSHA256, &cert.Version, &cert.SignatureAlgorithm,
+			&cert.PublicKeyAlgorithm, &cert.KeySize, &cert.NotBefore, &cert.NotAfter,
+			&cert.IsCA, &cert.IsSelfSigned, &cert.IsValid, &cert.IsExpired, &cert.IsExpiringSoon,
+			&cert.TLSVersion, &cert.CipherSuite, &cert.SecurityLevel,
+			&cert.LastScanned, &cert.FirstSeen, &cert.CreatedAt, &cert.UpdatedAt)
+	default:
+		return nil, fmt.Errorf("unsupported scanner type")
+	}
+
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("failed to scan certificate: %w", err)
+	}
+
+	return &cert, nil
+}
+
+// SQLiteTopologyRepository implements the TopologyRepository interface for SQLite
+type SQLiteTopologyRepository struct {
+	db *sql.DB
+}
+
+// NewSQLiteTopologyRepository creates a new SQLiteTopologyRepository
+func NewSQLiteTopologyRepository(db *sql.DB) *SQLiteTopologyRepository {
+	return &SQLiteTopologyRepository{db: db}
+}
+
+// Close closes the database connection
+func (r *SQLiteTopologyRepository) Close() error {
+	return r.db.Close()
+}
+
+// FindLatest finds the latest network topology
+func (r *SQLiteTopologyRepository) FindLatest(ctx context.Context) (*models.NetworkTopology, error) {
+	query := `SELECT id, local_subnet, COALESCE(discovered_routes, '[]'), COALESCE(gateways, '[]'),
+	          COALESCE(hop_counts, '{}'), last_discovered, created_at, updated_at
+	          FROM network_topology ORDER BY last_discovered DESC LIMIT 1`
+	
+	row := r.db.QueryRowContext(ctx, query)
+	return r.scanTopology(row)
+}
+
+// CreateOrUpdate creates or updates network topology
+func (r *SQLiteTopologyRepository) CreateOrUpdate(ctx context.Context, topology *models.NetworkTopology) (*models.NetworkTopology, error) {
+	if topology.ID == "" {
+		topology.ID = GenerateID()
+	}
+
+	// Marshal complex fields to JSON
+	routesJSON, err := json.Marshal(topology.DiscoveredRoutes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal routes: %w", err)
+	}
+
+	gatewaysJSON, err := json.Marshal(topology.Gateways)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal gateways: %w", err)
+	}
+
+	hopCountsJSON, err := json.Marshal(topology.HopCounts)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal hop counts: %w", err)
+	}
+
+	topology.UpdatedAt = time.Now()
+	if topology.CreatedAt.IsZero() {
+		topology.CreatedAt = time.Now()
+	}
+
+	// Check if record exists
+	existing, err := r.FindByLocalSubnet(ctx, topology.LocalSubnet)
+	if err != nil && err != ErrNotFound {
+		return nil, err
+	}
+
+	if existing != nil {
+		// Update existing record
+		topology.ID = existing.ID
+		query := `UPDATE network_topology SET discovered_routes = ?, gateways = ?, hop_counts = ?,
+		          last_discovered = ?, updated_at = ? WHERE id = ?`
+		
+		_, err = r.db.ExecContext(ctx, query,
+			string(routesJSON), string(gatewaysJSON), string(hopCountsJSON),
+			topology.LastDiscovered, topology.UpdatedAt, topology.ID)
+	} else {
+		// Insert new record
+		query := `INSERT INTO network_topology (id, local_subnet, discovered_routes, gateways,
+		          hop_counts, last_discovered, created_at, updated_at)
+		          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+		
+		_, err = r.db.ExecContext(ctx, query,
+			topology.ID, topology.LocalSubnet, string(routesJSON), string(gatewaysJSON),
+			string(hopCountsJSON), topology.LastDiscovered, topology.CreatedAt, topology.UpdatedAt)
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to save topology: %w", err)
+	}
+
+	return topology, nil
+}
+
+// FindByLocalSubnet finds topology by local subnet
+func (r *SQLiteTopologyRepository) FindByLocalSubnet(ctx context.Context, subnet string) (*models.NetworkTopology, error) {
+	query := `SELECT id, local_subnet, COALESCE(discovered_routes, '[]'), COALESCE(gateways, '[]'),
+	          COALESCE(hop_counts, '{}'), last_discovered, created_at, updated_at
+	          FROM network_topology WHERE local_subnet = ?`
+	
+	row := r.db.QueryRowContext(ctx, query, subnet)
+	return r.scanTopology(row)
+}
+
+// GetTopologyStats returns topology statistics
+func (r *SQLiteTopologyRepository) GetTopologyStats(ctx context.Context) (*models.TopologyStats, error) {
+	stats := &models.TopologyStats{
+		SubnetDistribution: make(map[string]int),
+		GatewayTypes:      make(map[string]int),
+	}
+
+	// Get basic counts
+	err := r.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM gateways").Scan(&stats.TotalGateways)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get gateway count: %w", err)
+	}
+
+	// Get latest topology for subnet analysis
+	topology, err := r.FindLatest(ctx)
+	if err != nil && err != ErrNotFound {
+		return nil, err
+	}
+
+	if topology != nil {
+		stats.TotalSubnets = len(topology.HopCounts)
+		stats.LastDiscovery = topology.LastDiscovered
+
+		// Calculate statistics
+		totalHops := 0
+		maxHops := 0
+		reachableCount := 0
+
+		for _, hopCount := range topology.HopCounts {
+			if hopCount > 0 {
+				reachableCount++
+				totalHops += hopCount
+				if hopCount > maxHops {
+					maxHops = hopCount
+				}
+				
+				hopStr := strconv.Itoa(hopCount)
+				stats.SubnetDistribution[hopStr]++
+			}
+		}
+
+		stats.ReachableSubnets = reachableCount
+		stats.MaxHopCount = maxHops
+		if reachableCount > 0 {
+			stats.AverageHopCount = float64(totalHops) / float64(reachableCount)
+		}
+	}
+
+	return stats, nil
+}
+
+// scanTopology scans a row into a NetworkTopology struct
+func (r *SQLiteTopologyRepository) scanTopology(scanner interface{}) (*models.NetworkTopology, error) {
+	var topology models.NetworkTopology
+	var routesJSON, gatewaysJSON, hopCountsJSON string
+
+	var err error
+	switch s := scanner.(type) {
+	case *sql.Row:
+		err = s.Scan(&topology.ID, &topology.LocalSubnet, &routesJSON, &gatewaysJSON,
+			&hopCountsJSON, &topology.LastDiscovered, &topology.CreatedAt, &topology.UpdatedAt)
+	case *sql.Rows:
+		err = s.Scan(&topology.ID, &topology.LocalSubnet, &routesJSON, &gatewaysJSON,
+			&hopCountsJSON, &topology.LastDiscovered, &topology.CreatedAt, &topology.UpdatedAt)
+	default:
+		return nil, fmt.Errorf("unsupported scanner type")
+	}
+
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("failed to scan topology: %w", err)
+	}
+
+	// Unmarshal JSON fields
+	if routesJSON != "" && routesJSON != "[]" {
+		if err := json.Unmarshal([]byte(routesJSON), &topology.DiscoveredRoutes); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal routes: %w", err)
+		}
+	}
+
+	if gatewaysJSON != "" && gatewaysJSON != "[]" {
+		if err := json.Unmarshal([]byte(gatewaysJSON), &topology.Gateways); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal gateways: %w", err)
+		}
+	}
+
+	if hopCountsJSON != "" && hopCountsJSON != "{}" {
+		if err := json.Unmarshal([]byte(hopCountsJSON), &topology.HopCounts); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal hop counts: %w", err)
+		}
+	}
+
+	// Initialize maps if nil
+	if topology.DiscoveredRoutes == nil {
+		topology.DiscoveredRoutes = []models.NetworkRoute{}
+	}
+	if topology.Gateways == nil {
+		topology.Gateways = []models.Gateway{}
+	}
+	if topology.HopCounts == nil {
+		topology.HopCounts = make(map[string]int)
+	}
+
+	return &topology, nil
+}
+
+// SQLiteGatewayRepository implements the GatewayRepository interface for SQLite
+type SQLiteGatewayRepository struct {
+	db *sql.DB
+}
+
+// NewSQLiteGatewayRepository creates a new SQLiteGatewayRepository
+func NewSQLiteGatewayRepository(db *sql.DB) *SQLiteGatewayRepository {
+	return &SQLiteGatewayRepository{db: db}
+}
+
+// Close closes the database connection
+func (r *SQLiteGatewayRepository) Close() error {
+	return r.db.Close()
+}
+
+// FindByIP finds a gateway by IP address
+func (r *SQLiteGatewayRepository) FindByIP(ctx context.Context, ip string) (*models.Gateway, error) {
+	query := `SELECT id, ip_address, COALESCE(mac_address, ''), COALESCE(hostname, ''),
+	          COALESCE(vendor, ''), is_default, COALESCE(subnets, '[]'), hop_distance,
+	          response_time, last_seen, created_at, updated_at
+	          FROM gateways WHERE ip_address = ?`
+	
+	row := r.db.QueryRowContext(ctx, query, ip)
+	return r.scanGateway(row)
+}
+
+// FindAll returns all gateways
+func (r *SQLiteGatewayRepository) FindAll(ctx context.Context) ([]*models.Gateway, error) {
+	query := `SELECT id, ip_address, COALESCE(mac_address, ''), COALESCE(hostname, ''),
+	          COALESCE(vendor, ''), is_default, COALESCE(subnets, '[]'), hop_distance,
+	          response_time, last_seen, created_at, updated_at
+	          FROM gateways ORDER BY is_default DESC, ip_address`
+	
+	rows, err := r.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query gateways: %w", err)
+	}
+	defer rows.Close()
+
+	var gateways []*models.Gateway
+	for rows.Next() {
+		gateway, err := r.scanGateway(rows)
+		if err != nil {
+			return nil, err
+		}
+		gateways = append(gateways, gateway)
+	}
+
+	return gateways, nil
+}
+
+// FindDefault finds the default gateway
+func (r *SQLiteGatewayRepository) FindDefault(ctx context.Context) (*models.Gateway, error) {
+	query := `SELECT id, ip_address, COALESCE(mac_address, ''), COALESCE(hostname, ''),
+	          COALESCE(vendor, ''), is_default, COALESCE(subnets, '[]'), hop_distance,
+	          response_time, last_seen, created_at, updated_at
+	          FROM gateways WHERE is_default = 1 LIMIT 1`
+	
+	row := r.db.QueryRowContext(ctx, query)
+	return r.scanGateway(row)
+}
+
+// CreateOrUpdate creates or updates a gateway
+func (r *SQLiteGatewayRepository) CreateOrUpdate(ctx context.Context, gateway *models.Gateway) (*models.Gateway, error) {
+	if gateway.ID == "" {
+		gateway.ID = GenerateID()
+	}
+
+	// Marshal subnets to JSON
+	subnetsJSON, err := json.Marshal(gateway.Subnets)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal subnets: %w", err)
+	}
+
+	gateway.UpdatedAt = time.Now()
+	if gateway.CreatedAt.IsZero() {
+		gateway.CreatedAt = time.Now()
+	}
+
+	// Check if gateway exists by IP
+	existing, err := r.FindByIP(ctx, gateway.IPAddress)
+	if err != nil && err != ErrNotFound {
+		return nil, err
+	}
+
+	if existing != nil {
+		// Update existing gateway
+		gateway.ID = existing.ID
+		query := `UPDATE gateways SET mac_address = ?, hostname = ?, vendor = ?, is_default = ?,
+		          subnets = ?, hop_distance = ?, response_time = ?, last_seen = ?, updated_at = ?
+		          WHERE id = ?`
+		
+		_, err = r.db.ExecContext(ctx, query,
+			gateway.MACAddress, gateway.Hostname, gateway.Vendor, gateway.IsDefault,
+			string(subnetsJSON), gateway.HopDistance, gateway.ResponseTime,
+			gateway.LastSeen, gateway.UpdatedAt, gateway.ID)
+	} else {
+		// Insert new gateway
+		query := `INSERT INTO gateways (id, ip_address, mac_address, hostname, vendor,
+		          is_default, subnets, hop_distance, response_time, last_seen, created_at, updated_at)
+		          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+		
+		_, err = r.db.ExecContext(ctx, query,
+			gateway.ID, gateway.IPAddress, gateway.MACAddress, gateway.Hostname, gateway.Vendor,
+			gateway.IsDefault, string(subnetsJSON), gateway.HopDistance, gateway.ResponseTime,
+			gateway.LastSeen, gateway.CreatedAt, gateway.UpdatedAt)
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to save gateway: %w", err)
+	}
+
+	return gateway, nil
+}
+
+// Delete removes a gateway by ID
+func (r *SQLiteGatewayRepository) Delete(ctx context.Context, id string) error {
+	query := `DELETE FROM gateways WHERE id = ?`
+	result, err := r.db.ExecContext(ctx, query, id)
+	if err != nil {
+		return fmt.Errorf("failed to delete gateway: %w", err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get rows affected: %w", err)
+	}
+
+	if rowsAffected == 0 {
+		return ErrNotFound
+	}
+
+	return nil
+}
+
+// UpdateLastSeen updates the last seen timestamp for a gateway
+func (r *SQLiteGatewayRepository) UpdateLastSeen(ctx context.Context, ip string, timestamp time.Time) error {
+	query := `UPDATE gateways SET last_seen = ?, updated_at = ? WHERE ip_address = ?`
+	_, err := r.db.ExecContext(ctx, query, timestamp, time.Now(), ip)
+	if err != nil {
+		return fmt.Errorf("failed to update gateway last seen: %w", err)
+	}
+	return nil
+}
+
+// scanGateway scans a row into a Gateway struct
+func (r *SQLiteGatewayRepository) scanGateway(scanner interface{}) (*models.Gateway, error) {
+	var gateway models.Gateway
+	var subnetsJSON string
+	var responseTime sql.NullFloat64
+
+	var err error
+	switch s := scanner.(type) {
+	case *sql.Row:
+		err = s.Scan(&gateway.ID, &gateway.IPAddress, &gateway.MACAddress, &gateway.Hostname,
+			&gateway.Vendor, &gateway.IsDefault, &subnetsJSON, &gateway.HopDistance,
+			&responseTime, &gateway.LastSeen, &gateway.CreatedAt, &gateway.UpdatedAt)
+	case *sql.Rows:
+		err = s.Scan(&gateway.ID, &gateway.IPAddress, &gateway.MACAddress, &gateway.Hostname,
+			&gateway.Vendor, &gateway.IsDefault, &subnetsJSON, &gateway.HopDistance,
+			&responseTime, &gateway.LastSeen, &gateway.CreatedAt, &gateway.UpdatedAt)
+	default:
+		return nil, fmt.Errorf("unsupported scanner type")
+	}
+
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("failed to scan gateway: %w", err)
+	}
+
+	// Handle nullable response time
+	if responseTime.Valid {
+		gateway.ResponseTime = &responseTime.Float64
+	}
+
+	// Unmarshal subnets JSON
+	if subnetsJSON != "" && subnetsJSON != "[]" {
+		if err := json.Unmarshal([]byte(subnetsJSON), &gateway.Subnets); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal subnets: %w", err)
+		}
+	}
+
+	// Initialize subnets if nil
+	if gateway.Subnets == nil {
+		gateway.Subnets = []string{}
+	}
+
+	return &gateway, nil
 }

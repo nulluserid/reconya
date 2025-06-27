@@ -258,6 +258,200 @@ func InitializeSchema(db *sql.DB) error {
 		return fmt.Errorf("failed to create index on web_services.device_id: %w", err)
 	}
 
+	// Create snmp_data table
+	_, err = db.Exec(`
+	CREATE TABLE IF NOT EXISTS snmp_data (
+		id TEXT PRIMARY KEY,
+		device_id TEXT NOT NULL,
+		system_name TEXT,
+		system_descr TEXT,
+		system_object_id TEXT,
+		system_contact TEXT,
+		system_location TEXT,
+		system_uptime INTEGER,
+		interface_count INTEGER,
+		interfaces TEXT, -- JSON array of interface data
+		community TEXT,
+		version TEXT,
+		custom_oids TEXT, -- JSON object of custom OID values
+		last_scanned TIMESTAMP NOT NULL,
+		scan_duration INTEGER, -- Duration in nanoseconds
+		created_at TIMESTAMP NOT NULL,
+		updated_at TIMESTAMP NOT NULL,
+		FOREIGN KEY (device_id) REFERENCES devices(id)
+	)`)
+	if err != nil {
+		return fmt.Errorf("failed to create snmp_data table: %w", err)
+	}
+
+	// Create index on device_id for SNMP data
+	_, err = db.Exec(`CREATE INDEX IF NOT EXISTS idx_snmp_data_device_id ON snmp_data(device_id)`)
+	if err != nil {
+		return fmt.Errorf("failed to create index on snmp_data.device_id: %w", err)
+	}
+
+	// Create certificates table
+	_, err = db.Exec(`
+	CREATE TABLE IF NOT EXISTS certificates (
+		id TEXT PRIMARY KEY,
+		device_id TEXT NOT NULL,
+		host TEXT NOT NULL,
+		port INTEGER NOT NULL,
+		protocol TEXT NOT NULL,
+		subject_common_name TEXT,
+		subject_organization TEXT,
+		issuer_common_name TEXT,
+		issuer_organization TEXT,
+		serial_number TEXT,
+		thumbprint TEXT NOT NULL,
+		thumbprint_sha256 TEXT NOT NULL,
+		version INTEGER,
+		signature_algorithm TEXT,
+		public_key_algorithm TEXT,
+		key_size INTEGER,
+		not_before TIMESTAMP NOT NULL,
+		not_after TIMESTAMP NOT NULL,
+		dns_names TEXT, -- JSON array
+		ip_addresses TEXT, -- JSON array
+		is_ca BOOLEAN DEFAULT 0,
+		is_self_signed BOOLEAN DEFAULT 0,
+		is_valid BOOLEAN DEFAULT 1,
+		is_expired BOOLEAN DEFAULT 0,
+		is_expiring_soon BOOLEAN DEFAULT 0,
+		validation_errors TEXT, -- JSON array
+		certificate_chain TEXT, -- JSON array
+		tls_version TEXT,
+		cipher_suite TEXT,
+		security_level TEXT,
+		last_scanned TIMESTAMP NOT NULL,
+		first_seen TIMESTAMP NOT NULL,
+		created_at TIMESTAMP NOT NULL,
+		updated_at TIMESTAMP NOT NULL,
+		FOREIGN KEY (device_id) REFERENCES devices(id)
+	)`)
+	if err != nil {
+		return fmt.Errorf("failed to create certificates table: %w", err)
+	}
+
+	// Create indexes for certificates
+	_, err = db.Exec(`CREATE INDEX IF NOT EXISTS idx_certificates_device_id ON certificates(device_id)`)
+	if err != nil {
+		return fmt.Errorf("failed to create index on certificates.device_id: %w", err)
+	}
+
+	_, err = db.Exec(`CREATE INDEX IF NOT EXISTS idx_certificates_host_port ON certificates(host, port)`)
+	if err != nil {
+		return fmt.Errorf("failed to create index on certificates.host_port: %w", err)
+	}
+
+	_, err = db.Exec(`CREATE INDEX IF NOT EXISTS idx_certificates_thumbprint ON certificates(thumbprint)`)
+	if err != nil {
+		return fmt.Errorf("failed to create index on certificates.thumbprint: %w", err)
+	}
+
+	_, err = db.Exec(`CREATE INDEX IF NOT EXISTS idx_certificates_expiration ON certificates(not_after)`)
+	if err != nil {
+		return fmt.Errorf("failed to create index on certificates.not_after: %w", err)
+	}
+
+	// Create network_topology table
+	_, err = db.Exec(`
+	CREATE TABLE IF NOT EXISTS network_topology (
+		id TEXT PRIMARY KEY,
+		local_subnet TEXT NOT NULL,
+		discovered_routes TEXT, -- JSON array
+		gateways TEXT, -- JSON array
+		hop_counts TEXT, -- JSON object
+		last_discovered TIMESTAMP NOT NULL,
+		created_at TIMESTAMP NOT NULL,
+		updated_at TIMESTAMP NOT NULL
+	)`)
+	if err != nil {
+		return fmt.Errorf("failed to create network_topology table: %w", err)
+	}
+
+	// Create gateways table
+	_, err = db.Exec(`
+	CREATE TABLE IF NOT EXISTS gateways (
+		id TEXT PRIMARY KEY,
+		ip_address TEXT NOT NULL UNIQUE,
+		mac_address TEXT,
+		hostname TEXT,
+		vendor TEXT,
+		is_default BOOLEAN DEFAULT 0,
+		subnets TEXT, -- JSON array
+		hop_distance INTEGER,
+		response_time REAL,
+		last_seen TIMESTAMP NOT NULL,
+		created_at TIMESTAMP NOT NULL,
+		updated_at TIMESTAMP NOT NULL
+	)`)
+	if err != nil {
+		return fmt.Errorf("failed to create gateways table: %w", err)
+	}
+
+	// Create traceroute_results table
+	_, err = db.Exec(`
+	CREATE TABLE IF NOT EXISTS traceroute_results (
+		id TEXT PRIMARY KEY,
+		source TEXT NOT NULL,
+		destination TEXT NOT NULL,
+		hops TEXT NOT NULL, -- JSON array
+		total_hops INTEGER,
+		success BOOLEAN,
+		duration INTEGER, -- Duration in nanoseconds
+		timestamp TIMESTAMP NOT NULL
+	)`)
+	if err != nil {
+		return fmt.Errorf("failed to create traceroute_results table: %w", err)
+	}
+
+	// Create subnet_reachability table
+	_, err = db.Exec(`
+	CREATE TABLE IF NOT EXISTS subnet_reachability (
+		id TEXT PRIMARY KEY,
+		subnet_cidr TEXT NOT NULL UNIQUE,
+		is_reachable BOOLEAN,
+		hop_count INTEGER,
+		preferred_gateway TEXT,
+		alternate_gateways TEXT, -- JSON array
+		latency_ms REAL,
+		device_count INTEGER DEFAULT 0,
+		active_devices INTEGER DEFAULT 0,
+		last_scanned TIMESTAMP NOT NULL,
+		created_at TIMESTAMP NOT NULL,
+		updated_at TIMESTAMP NOT NULL
+	)`)
+	if err != nil {
+		return fmt.Errorf("failed to create subnet_reachability table: %w", err)
+	}
+
+	// Create indexes for topology tables
+	_, err = db.Exec(`CREATE INDEX IF NOT EXISTS idx_gateways_ip ON gateways(ip_address)`)
+	if err != nil {
+		return fmt.Errorf("failed to create index on gateways.ip_address: %w", err)
+	}
+
+	_, err = db.Exec(`CREATE INDEX IF NOT EXISTS idx_gateways_default ON gateways(is_default)`)
+	if err != nil {
+		return fmt.Errorf("failed to create index on gateways.is_default: %w", err)
+	}
+
+	_, err = db.Exec(`CREATE INDEX IF NOT EXISTS idx_traceroute_destination ON traceroute_results(destination)`)
+	if err != nil {
+		return fmt.Errorf("failed to create index on traceroute_results.destination: %w", err)
+	}
+
+	_, err = db.Exec(`CREATE INDEX IF NOT EXISTS idx_subnet_reachability_cidr ON subnet_reachability(subnet_cidr)`)
+	if err != nil {
+		return fmt.Errorf("failed to create index on subnet_reachability.subnet_cidr: %w", err)
+	}
+
+	_, err = db.Exec(`CREATE INDEX IF NOT EXISTS idx_subnet_reachability_reachable ON subnet_reachability(is_reachable)`)
+	if err != nil {
+		return fmt.Errorf("failed to create index on subnet_reachability.is_reachable: %w", err)
+	}
+
 	log.Println("Database schema initialized successfully")
 	return nil
 }

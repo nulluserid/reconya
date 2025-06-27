@@ -25,6 +25,8 @@ type Config struct {
 	DatabaseName string
 	// Port scanning config
 	ScanAllPorts bool // Whether to scan all 65535 ports instead of just top 100
+	// SNMP scanning config
+	SNMPCommunityStrings string // Comma-separated list of SNMP community strings
 }
 
 func LoadConfig() (*Config, error) {
@@ -63,12 +65,16 @@ func LoadConfig() (*Config, error) {
 		scanAllPorts = true
 	}
 
+	// Parse SNMP community strings (optional)
+	snmpCommunityStrings := os.Getenv("SNMP_COMMUNITY_STRINGS")
+
 	config := &Config{
-		NetworkCIDR:   networkCIDR,
-		NetworkRanges: networkRanges,
-		DatabaseType:  DatabaseType(dbType),
-		DatabaseName:  databaseName,
-		ScanAllPorts:  scanAllPorts,
+		NetworkCIDR:          networkCIDR,
+		NetworkRanges:        networkRanges,
+		DatabaseType:         DatabaseType(dbType),
+		DatabaseName:         databaseName,
+		ScanAllPorts:         scanAllPorts,
+		SNMPCommunityStrings: snmpCommunityStrings,
 	}
 
 	// Configure SQLite database

@@ -53,6 +53,8 @@ type Device struct {
 	Ports             []Port        `bson:"ports,omitempty" json:"ports,omitempty"`
 	Hostname          *string       `bson:"hostname,omitempty" json:"hostname,omitempty"`
 	WebServices       []WebService  `bson:"web_services,omitempty" json:"web_services,omitempty"`
+	SNMPData          *SNMPData     `bson:"snmp_data,omitempty" json:"snmp_data,omitempty"`
+	Certificates      []Certificate `bson:"certificates,omitempty" json:"certificates,omitempty"`
 	CreatedAt         time.Time     `bson:"created_at" json:"created_at"`
 	UpdatedAt         time.Time     `bson:"updated_at" json:"updated_at"`
 	LastSeenOnlineAt  *time.Time    `bson:"last_seen_online_at,omitempty" json:"last_seen_online_at,omitempty"`
